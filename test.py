@@ -64,6 +64,7 @@ trainer.eval()
 encode = trainer.gen_a.encode if opts.a2b else trainer.gen_b.encode # encode function
 style_encode = trainer.gen_b.encode if opts.a2b else trainer.gen_a.encode # encode function
 decode = trainer.gen_b.decode if opts.a2b else trainer.gen_a.decode # decode function
+style_decode = trainer.gen_a.decode if opts.a2b else trainer.gen_b.decode # decode function
 
 if 'new_size' in config:
     new_size = config['new_size']
@@ -81,20 +82,34 @@ with torch.no_grad():
     style_image = Variable(transform(Image.open(opts.style).convert('RGB')).unsqueeze(0).cuda()) if opts.style != '' else None
 
     # Start testing
-    content, _ = encode(image)
+    content, _style = encode(image)
 
     if opts.trainer == 'MUNIT':
         style_rand = Variable(torch.randn(opts.num_style, style_dim, 1, 1).cuda())
         if opts.style != '':
-            _, style = style_encode(style_image)
+            _content, style = style_encode(style_image)
         else:
             style = style_rand
+
+        # recon image
+        recon_input = style_decode(content, _style)
+
+
         for j in range(opts.num_style):
             s = style[j].unsqueeze(0)
             outputs = decode(content, s)
             outputs = (outputs + 1) / 2.
             path = os.path.join(opts.output_folder, 'output{:03d}.jpg'.format(j))
             vutils.save_image(outputs.data, path, padding=0, normalize=True)
+
+            #recon input with random_style
+            recon_style = style_decode(content,s)
+            recon_style = (recon_style + 1) / 2.
+            recon_path = os.path.join(opts.output_folder, 'recon_input_style{:03d}.jpg'.format(j))
+            vutils.save_image(recon_style.data, recon_path, padding=0, normalize=True)
+
+
+
     elif opts.trainer == 'UNIT':
         outputs = decode(content)
         outputs = (outputs + 1) / 2.
@@ -106,4 +121,8 @@ with torch.no_grad():
     if not opts.output_only:
         # also save input images
         vutils.save_image(image.data, os.path.join(opts.output_folder, 'input.jpg'), padding=0, normalize=True)
+        # also save recon image
+        vutils.save_image(recon_input.data, os.path.join(opts.output_folder, 'recon_input.jpg'), padding=0, normalize=True)
+
+
 
