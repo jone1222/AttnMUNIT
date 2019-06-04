@@ -6,6 +6,9 @@ from torch import nn
 from torch.autograd import Variable
 import torch
 import torch.nn.functional as F
+
+import attention
+
 try:
     from itertools import izip as zip
 except ImportError: # will be 3.x series
@@ -85,6 +88,61 @@ class MsImageDis(nn.Module):
 ##################################################################################
 # Generator
 ##################################################################################
+class AttnGen(nn.Module):
+    # AdaIN auto-encoder architecture
+    def __init__(self, input_dim, params):
+        super(AttnGen, self).__init__()
+        dim = params['dim']
+        style_dim = params['style_dim']
+        n_downsample = params['n_downsample']
+        n_res = params['n_res']
+        activ = params['activ']
+        pad_type = params['pad_type']
+
+        # style encoder
+        self.enc_style = AttnGenStyleEncoder(4, input_dim, dim, norm='none', activ=activ, pad_type=pad_type)
+
+        # content encoder
+        self.enc_content = ContentEncoder(n_downsample, n_res, input_dim, dim, 'in', activ, pad_type=pad_type)
+        self.dec = Decoder(n_downsample, n_res, self.enc_content.output_dim, input_dim, res_norm='in', activ=activ, pad_type=pad_type)
+
+        #attention network
+        self.attention_net = \
+            attention.InterModalityUpdate(
+                64*64,
+                16*16,
+                output_size=16*16,num_head=8)
+
+    def forward(self, images):
+        # reconstruct an image
+        content, style_fake = self.encode(images)
+        images_recon = self.decode(content, style_fake)
+        return images_recon
+
+    def encode(self, images):
+        # encode an image to its content and style codes
+        style_fake = self.enc_style(images)
+        content = self.enc_content(images)
+        return content, style_fake
+
+    def decode(self, content, style):
+        # decode content and style codes to an image
+
+        content = self.get_attention(content,style)
+        images = self.dec(content)
+        return images
+
+    def get_attention(self,content,style):
+        h,w = content.size(2),content.size(3)
+        content = content.view(content.size(0),content.size(1),-1)
+        style = style.view(style.size(0),style.size(1),-1)
+
+        ##############
+        #attention
+        content_update, style_update = self.attention_net(content,style)
+        content_update = content_update.view(content_update.size(0),content_update.size(1),h,w)
+        return content_update
+
 
 class AdaINGen(nn.Module):
     # AdaIN auto-encoder architecture
@@ -99,7 +157,7 @@ class AdaINGen(nn.Module):
         mlp_dim = params['mlp_dim']
 
         # style encoder
-        self.enc_style = StyleEncoder(4, input_dim, dim, style_dim, norm='none', activ=activ, pad_type=pad_type)
+        self.enc_style = StyleEncoder(4, input_dim, dim,style_dim, norm='none', activ=activ, pad_type=pad_type)
 
         # content encoder
         self.enc_content = ContentEncoder(n_downsample, n_res, input_dim, dim, 'in', activ, pad_type=pad_type)
@@ -220,8 +278,28 @@ class ContentEncoder(nn.Module):
     def forward(self, x):
         return self.model(x)
 
+class AttnGenStyleEncoder(nn.Module):
+    def __init__(self, n_downsample, input_dim, dim, norm, activ, pad_type):
+        super(AttnGenStyleEncoder, self).__init__()
+        self.model = []
+        self.model += [Conv2dBlock(input_dim, dim, 7, 1, 3, norm=norm, activation=activ, pad_type=pad_type)]
+        for i in range(2):
+            self.model += [Conv2dBlock(dim, 2 * dim, 4, 2, 1, norm=norm, activation=activ, pad_type=pad_type)]
+            dim *= 2
+        for i in range(n_downsample - 2):
+            self.model += [Conv2dBlock(dim, dim, 4, 2, 1, norm=norm, activation=activ, pad_type=pad_type)]
+
+        # self.model += [nn.AdaptiveAvgPool2d(1)] # global average pooling
+        # self.model += [nn.Conv2d(dim, style_dim, 1, 1, 0)]
+        self.model = nn.Sequential(*self.model)
+        self.output_dim = dim
+
+    def forward(self, x):
+        return self.model(x)
+
+
 class Decoder(nn.Module):
-    def __init__(self, n_upsample, n_res, dim, output_dim, res_norm='adain', activ='relu', pad_type='zero'):
+    def __init__(self, n_upsample, n_res, dim, output_dim, res_norm='in', activ='relu', pad_type='zero'):
         super(Decoder, self).__init__()
 
         self.model = []

@@ -2,7 +2,7 @@
 Copyright (C) 2017 NVIDIA Corporation.  All rights reserved.
 Licensed under the CC BY-NC-SA 4.0 license (https://creativecommons.org/licenses/by-nc-sa/4.0/legalcode).
 """
-from networks import AdaINGen, MsImageDis, VAEGen
+from networks import AdaINGen, MsImageDis, VAEGen, AttnGen
 from utils import weights_init, get_model_list, vgg_preprocess, load_vgg16, get_scheduler
 from torch.autograd import Variable
 import torch
@@ -14,8 +14,11 @@ class MUNIT_Trainer(nn.Module):
         super(MUNIT_Trainer, self).__init__()
         lr = hyperparameters['lr']
         # Initiate the networks
-        self.gen_a = AdaINGen(hyperparameters['input_dim_a'], hyperparameters['gen'])  # auto-encoder for domain a
-        self.gen_b = AdaINGen(hyperparameters['input_dim_b'], hyperparameters['gen'])  # auto-encoder for domain b
+
+        self.gen_a = AttnGen(hyperparameters['input_dim_a'], hyperparameters['gen'])  # auto-encoder for domain a
+        self.gen_b = AttnGen(hyperparameters['input_dim_b'], hyperparameters['gen'])  # auto-encoder for domain b
+        # self.gen_a = AdaINGen(hyperparameters['input_dim_a'], hyperparameters['gen'])  # auto-encoder for domain a
+        # self.gen_b = AdaINGen(hyperparameters['input_dim_b'], hyperparameters['gen'])  # auto-encoder for domain b
         self.dis_a = MsImageDis(hyperparameters['input_dim_a'], hyperparameters['dis'])  # discriminator for domain a
         self.dis_b = MsImageDis(hyperparameters['input_dim_b'], hyperparameters['dis'])  # discriminator for domain b
         self.instancenorm = nn.InstanceNorm2d(512, affine=False)
@@ -23,8 +26,12 @@ class MUNIT_Trainer(nn.Module):
 
         # fix the noise used in sampling
         display_size = int(hyperparameters['display_size'])
-        self.s_a = torch.randn(display_size, self.style_dim, 1, 1).cuda()
-        self.s_b = torch.randn(display_size, self.style_dim, 1, 1).cuda()
+        # self.s_a = torch.randn(display_size, self.style_dim, 1, 1).cuda()
+        # self.s_b = torch.randn(display_size, self.style_dim, 1, 1).cuda()
+
+        # AttnGen Style Shape --> x.size(0) x 256 x 16 x 16
+        self.s_a = Variable(torch.randn(display_size, 256, 16, 16).cuda())
+        self.s_b = Variable(torch.randn(display_size, 256, 16, 16).cuda())
 
         # Setup the optimizers
         beta1 = hyperparameters['beta1']
@@ -66,8 +73,13 @@ class MUNIT_Trainer(nn.Module):
 
     def gen_update(self, x_a, x_b, hyperparameters):
         self.gen_opt.zero_grad()
-        s_a = Variable(torch.randn(x_a.size(0), self.style_dim, 1, 1).cuda())
-        s_b = Variable(torch.randn(x_b.size(0), self.style_dim, 1, 1).cuda())
+        # s_a = Variable(torch.randn(x_a.size(0), self.style_dim, 1, 1).cuda())
+        # s_b = Variable(torch.randn(x_b.size(0), self.style_dim, 1, 1).cuda())
+
+        # AttnGen Style Shape --> x.size(0) x 256 x 16 x 16
+        s_a = Variable(torch.randn(x_a.size(0), 256, 16, 16).cuda())
+        s_b = Variable(torch.randn(x_b.size(0), 256, 16, 16).cuda())
+
         # encode
         c_a, s_a_prime = self.gen_a.encode(x_a)
         c_b, s_b_prime = self.gen_b.encode(x_b)
@@ -126,8 +138,13 @@ class MUNIT_Trainer(nn.Module):
         self.eval()
         s_a1 = Variable(self.s_a)
         s_b1 = Variable(self.s_b)
-        s_a2 = Variable(torch.randn(x_a.size(0), self.style_dim, 1, 1).cuda())
-        s_b2 = Variable(torch.randn(x_b.size(0), self.style_dim, 1, 1).cuda())
+        # s_a2 = Variable(torch.randn(x_a.size(0), self.style_dim, 1, 1).cuda())
+        # s_b2 = Variable(torch.randn(x_b.size(0), self.style_dim, 1, 1).cuda())
+
+        # AttnGen Style Shape --> x.size(0) x 256 x 16 x 16
+        s_a2 = Variable(torch.randn(x_a.size(0), 256, 16, 16).cuda())
+        s_b2 = Variable(torch.randn(x_b.size(0), 256, 16, 16).cuda())
+
         x_a_recon, x_b_recon, x_ba1, x_ba2, x_ab1, x_ab2 = [], [], [], [], [], []
         for i in range(x_a.size(0)):
             c_a, s_a_fake = self.gen_a.encode(x_a[i].unsqueeze(0))
@@ -146,8 +163,13 @@ class MUNIT_Trainer(nn.Module):
 
     def dis_update(self, x_a, x_b, hyperparameters):
         self.dis_opt.zero_grad()
-        s_a = Variable(torch.randn(x_a.size(0), self.style_dim, 1, 1).cuda())
-        s_b = Variable(torch.randn(x_b.size(0), self.style_dim, 1, 1).cuda())
+        # s_a = Variable(torch.randn(x_a.size(0), self.style_dim, 1, 1).cuda())
+        # s_b = Variable(torch.randn(x_b.size(0), self.style_dim, 1, 1).cuda())
+
+        # AttnGen Style Shape --> x.size(0) x 256 x 16 x 16
+        s_a = Variable(torch.randn(x_a.size(0), 256, 16, 16).cuda())
+        s_b = Variable(torch.randn(x_b.size(0), 256, 16, 16).cuda())
+
         # encode
         c_a, _ = self.gen_a.encode(x_a)
         c_b, _ = self.gen_b.encode(x_b)
