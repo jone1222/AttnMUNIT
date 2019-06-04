@@ -9,6 +9,7 @@ import torch.nn.functional as F
 
 import attention
 
+
 try:
     from itertools import izip as zip
 except ImportError: # will be 3.x series
@@ -157,7 +158,8 @@ class AdaINGen(nn.Module):
         mlp_dim = params['mlp_dim']
 
         # style encoder
-        self.enc_style = StyleEncoder(4, input_dim, dim,style_dim, norm='none', activ=activ, pad_type=pad_type)
+        self.enc_style = StyleEncoder(4, input_dim, dim, style_dim, norm='none', activ=activ, pad_type=pad_type)
+
 
         # content encoder
         self.enc_content = ContentEncoder(n_downsample, n_res, input_dim, dim, 'in', activ, pad_type=pad_type)
