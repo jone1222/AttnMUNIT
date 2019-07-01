@@ -31,8 +31,8 @@ class MUNIT_Trainer(nn.Module):
         # self.s_b = torch.randn(display_size, self.style_dim, 1, 1).cuda()
 
         # AttnGen Style Shape --> x.size(0) x 256 x 16 x 16
-        self.s_a = Variable(torch.randn(display_size, 256, 16, 16).cuda())
-        self.s_b = Variable(torch.randn(display_size, 256, 16, 16).cuda())
+        self.s_a = Variable(torch.randn(display_size, 1024, 16, 16).cuda())
+        self.s_b = Variable(torch.randn(display_size, 1024, 16, 16).cuda())
 
 
         # Setup the optimizers
@@ -78,9 +78,13 @@ class MUNIT_Trainer(nn.Module):
         # s_a = Variable(torch.randn(x_a.size(0), self.style_dim, 1, 1).cuda())
         # s_b = Variable(torch.randn(x_b.size(0), self.style_dim, 1, 1).cuda())
 
-        # AttnGen Style Shape --> x.size(0) x 256 x 16 x 16
-        s_a = Variable(torch.randn(x_a.size(0), 256, 16, 16).cuda())
-        s_b = Variable(torch.randn(x_b.size(0), 256, 16, 16).cuda())
+        # AttnGen Style Shape --> x.size(0)=opt.batch_size x 256 x 16 x 16gen
+        s_a = Variable(torch.randn(x_a.size(0), 1024, 16, 16).cuda())
+        s_b = Variable(torch.randn(x_b.size(0), 1024, 16, 16).cuda())
+
+        # random_variable for mode_seeking loss
+        s_a_2 = Variable(torch.randn(x_a.size(0), 1024, 16, 16).cuda())
+        s_b_2 = Variable(torch.randn(x_b.size(0), 1024, 16, 16).cuda())
 
         # encode
         c_a, s_a_prime = self.gen_a.encode(x_a)
@@ -98,6 +102,11 @@ class MUNIT_Trainer(nn.Module):
         x_aba = self.gen_a.decode(c_a_recon, s_a_prime) if hyperparameters['recon_x_cyc_w'] > 0 else None
         x_bab = self.gen_b.decode(c_b_recon, s_b_prime) if hyperparameters['recon_x_cyc_w'] > 0 else None
 
+        # mode seeking decode (cross domain)
+        x_ba_2 = self.gen_a.decode(c_b, s_a_2)
+        x_ab_2 = self.gen_b.decode(c_a, s_b_2)
+
+
         # reconstruction loss
         self.loss_gen_recon_x_a = self.recon_criterion(x_a_recon, x_a)
         self.loss_gen_recon_x_b = self.recon_criterion(x_b_recon, x_b)
@@ -113,7 +122,33 @@ class MUNIT_Trainer(nn.Module):
         # domain-invariant perceptual loss
         self.loss_gen_vgg_a = self.compute_vgg_loss(self.vgg, x_ba, x_b) if hyperparameters['vgg_w'] > 0 else 0
         self.loss_gen_vgg_b = self.compute_vgg_loss(self.vgg, x_ab, x_a) if hyperparameters['vgg_w'] > 0 else 0
+
+        # mode seeking loss
+        # mode seeking loss for A-->B and B-->A
+        lz_AB = torch.mean(torch.abs(x_ab_2 - x_ab)) / torch.mean(
+            torch.abs(s_b_2 - s_b))
+        lz_BA = torch.mean(torch.abs(x_ba_2 - x_ba)) / torch.mean(
+            torch.abs(s_a_2 - s_a))
+        eps = 1 * 1e-5
+        self.loss_lz_AB = 1 / (lz_AB + eps)
+        self.loss_lz_BA = 1 / (lz_BA + eps)
+
+
         # total loss
+        # self.loss_gen_total = hyperparameters['gan_w'] * self.loss_gen_adv_a + \
+        #                       hyperparameters['gan_w'] * self.loss_gen_adv_b + \
+        #                       hyperparameters['recon_x_w'] * self.loss_gen_recon_x_a + \
+        #                       hyperparameters['recon_s_w'] * self.loss_gen_recon_s_a + \
+        #                       hyperparameters['recon_c_w'] * self.loss_gen_recon_c_a + \
+        #                       hyperparameters['recon_x_w'] * self.loss_gen_recon_x_b + \
+        #                       hyperparameters['recon_s_w'] * self.loss_gen_recon_s_b + \
+        #                       hyperparameters['recon_c_w'] * self.loss_gen_recon_c_b + \
+        #                       hyperparameters['recon_x_cyc_w'] * self.loss_gen_cycrecon_x_a + \
+        #                       hyperparameters['recon_x_cyc_w'] * self.loss_gen_cycrecon_x_b + \
+        #                       hyperparameters['vgg_w'] * self.loss_gen_vgg_a + \
+        #                       hyperparameters['vgg_w'] * self.loss_gen_vgg_b
+
+        #totalloss + mode seeking
         self.loss_gen_total = hyperparameters['gan_w'] * self.loss_gen_adv_a + \
                               hyperparameters['gan_w'] * self.loss_gen_adv_b + \
                               hyperparameters['recon_x_w'] * self.loss_gen_recon_x_a + \
@@ -125,7 +160,10 @@ class MUNIT_Trainer(nn.Module):
                               hyperparameters['recon_x_cyc_w'] * self.loss_gen_cycrecon_x_a + \
                               hyperparameters['recon_x_cyc_w'] * self.loss_gen_cycrecon_x_b + \
                               hyperparameters['vgg_w'] * self.loss_gen_vgg_a + \
-                              hyperparameters['vgg_w'] * self.loss_gen_vgg_b
+                              hyperparameters['vgg_w'] * self.loss_gen_vgg_b + \
+                              hyperparameters['ms_w'] * self.loss_lz_AB + \
+                              hyperparameters['ms_w'] * self.loss_lz_BA
+
         self.loss_gen_total.backward()
         self.gen_opt.step()
 
@@ -145,8 +183,8 @@ class MUNIT_Trainer(nn.Module):
         # s_b2 = Variable(torch.randn(x_b.size(0), self.style_dim, 1, 1).cuda())
 
         # AttnGen Style Shape --> x.size(0) x 256 x 16 x 16
-        s_a2 = Variable(torch.randn(x_a.size(0), 256, 16, 16).cuda())
-        s_b2 = Variable(torch.randn(x_b.size(0), 256, 16, 16).cuda())
+        s_a2 = Variable(torch.randn(x_a.size(0), 1024, 16, 16).cuda())
+        s_b2 = Variable(torch.randn(x_b.size(0), 1024, 16, 16).cuda())
 
         x_a_recon, x_b_recon, x_ba1, x_ba2, x_ab1, x_ab2 = [], [], [], [], [], []
         for i in range(x_a.size(0)):
@@ -170,8 +208,8 @@ class MUNIT_Trainer(nn.Module):
         # s_b = Variable(torch.randn(x_b.size(0), self.style_dim, 1, 1).cuda())
 
         # AttnGen Style Shape --> x.size(0) x 256 x 16 x 16
-        s_a = Variable(torch.randn(x_a.size(0), 256, 16, 16).cuda())
-        s_b = Variable(torch.randn(x_b.size(0), 256, 16, 16).cuda())
+        s_a = Variable(torch.randn(x_a.size(0), 1024, 16, 16).cuda())
+        s_b = Variable(torch.randn(x_b.size(0), 1024, 16, 16).cuda())
 
         # encode
         c_a, _ = self.gen_a.encode(x_a)

@@ -16,6 +16,151 @@ from torch.nn.utils.rnn import pack_padded_sequence
 # from utils import get_config
 # config = get_config(opts.config)
 
+
+
+class ContentStyleAttentionblock(nn.Module):
+    def __init__(self, dim, norm='in'):
+        super(StyleAttentionBlock, self).__init__()
+
+        #content --> 256 * 4 * 4
+        #style --> 256 * 1
+
+
+    def forward(self, content, style):
+        #Reshape content -> 256 * 16 // style --> 256 * 1
+        content = content.view(content.size(0),content.size(1),-1)
+
+        #1. expand style feature 256* 1 --> 256 * 16
+
+        #2. element-wise multiplication with content feature --> 256 * 16  .. 256 * 16 --> 256 * 16
+
+        #3. use fc layer 256 * 16 -> 256 * 1
+
+        # softmax 256 * 1
+
+        return
+
+class StyleAttentionBlock(nn.Module):
+    def __init__(self,dim,norm='in',is_first_level=True):
+        super(StyleAttentionBlock,self).__init__()
+        self.content_conv_block = self.build_conv_block(dim,norm)
+        self.style_conv_block = self.build_conv_block(dim,norm,is_first_level)
+
+    def build_conv_block(self,dim,norm,is_first_level=True):
+        if norm == 'bn':
+            norm_layer = nn.BatchNorm2d
+        else:
+            norm_layer = nn.InstanceNorm2d
+
+        conv_block = []
+
+        if is_first_level:
+            conv_block += [nn.Conv2d(dim, dim, kernel_size=3, padding=1), norm_layer(dim), nn.ReLU()]
+        else:
+            conv_block += [nn.Conv2d(dim * 2, dim * 2, kernel_size=3, padding=1), norm_layer(dim * 2), nn.ReLU()]
+
+        if is_first_level:
+            conv_block += [nn.Conv2d(dim, dim, kernel_size=3, padding=1), norm_layer(dim), nn.ReLU()]
+        else:
+            conv_block += [nn.Conv2d(dim * 2, dim, kernel_size=3, padding=1), norm_layer(dim * 2)]
+
+        return  nn.Sequential(*conv_block)
+
+    def forward(self,content,style):
+        style_update = self.style_mask_net(style)
+        style_mask = nn.functional.sigmoid(style_update)
+
+        content_update = self.content_conv_block(content)
+
+        content_update = content_update * style_mask
+
+        content_output = content_update + content
+
+        style_output = torch.cat((style_update,content_output),1)
+
+        return content_output, style_output, content_update
+
+
+class ASquare(nn.Module):
+    def __init__(self,in_channels,attention_dim,k = 2):
+        super(ASquare,self).__init__()
+
+
+        self.in_channels = in_channels
+        self.attention_dim = attention_dim
+
+        self.net_theta = nn.Conv2d(self.in_channels,self.attention_dim,kernel_size = 1,stride = 1,padding=0)
+        self.net_pi = nn.Conv2d(self.in_channels, self.attention_dim, kernel_size=1, stride=1, padding=0)
+        self.net_g = nn.Conv2d(self.in_channels, self.attention_dim, kernel_size=1, stride=1, padding=0)
+
+        self.out_conv = nn.Conv2d(self.attention_dim, self.in_channels, kernel_size=1, stride = 1, padding = 0)
+
+        self.K = k
+
+        self.c_m = self.attention_dim
+        self.c_n = self.attention_dim
+
+        self.softmax = nn.Softmax()
+
+
+    def forward(self,content,style):
+
+        # content = content.view(content.size(0),content.size(1),-1)
+        # style = style.view(style.size(0),style.size(1),-1)
+
+
+
+        x = torch.cat((content,style),0)
+
+        b, c, h, w = x.size()
+
+
+
+        assert c == self.in_channels, 'input channel not equal!'
+        # assert b//self.K == self.in_channels, 'input channel not equal!'
+        feat_theta = self.net_theta(x)
+        feat_pi = self.net_pi(x)
+        feat_g = self.net_g(x)
+        batch = int(b / self.K)
+
+        # pdb.set_trace()
+        tmp_theta = feat_theta.view(batch, self.K, self.c_m, h * w).permute(0, 2, 1, 3).contiguous().view(batch, self.c_m, self.K * h * w)
+        tmp_pi = feat_pi.view(batch, self.K, self.c_n, h * w).permute(0, 2, 1, 3).contiguous().view(batch * self.c_n, self.K * h * w)
+        tmp_g = feat_g.view(batch, self.K, self.c_n, h * w).permute(0, 1, 3, 2).contiguous().view(int(b * h * w), self.c_n)
+        softmax_pi = self.softmax(tmp_pi).view(batch, self.c_n, self.K * h * w).permute(0, 2,1)  # batch, self.K*h*w, self.c_n
+        softmax_g = self.softmax(tmp_g).view(batch, self.K * h * w, self.c_n).permute(0, 2, 1)  # batch, self.c_n , self.K*h*w
+        tmpG = tmp_theta.matmul(softmax_pi)  # batch, self.c_m, self.c_n
+        tmpZ = tmpG.matmul(softmax_g)  # batch, self.c_m, self.K*h*w
+        tmpZ = tmpZ.view(batch, self.c_m, self.K, h * w).permute(0, 2, 1, 3).view(int(b), self.c_m, h, w)
+
+        output = self.out_conv(tmpZ)
+
+        content_update, style_update = torch.split(output, 1, dim=0)
+
+        return (content_update, style_update)
+
+
+
+        #
+        # theta = self.net_theta(x)
+        # pi = self.net_pi(x)
+        # g = self.net_g(x)
+        #
+        # theta = theta.view(theta.size(0),theta.size(1),-1).transpose(1,2)
+        # pi = pi.view(pi.size(0),pi.size(1),-1)
+        # g = pi.view(g.size(0), g.size(1), -1)
+        #
+        # theta_mul_pi = nn.functional.softmax(theta @ pi)
+        #
+        # g_mul_softmax = (theta_mul_pi @ g)
+        # g_mul_softmax = g_mul_softmax
+
+
+
+
+
+
+
 class Net(nn.Module):
     """
     Implementation of Dynamic Fusion with Intra- and Inter-modality Attention Flow for Visual Question Answering (DFAF)
@@ -199,15 +344,36 @@ class InterModalityUpdate(nn.Module):
     Inter-modality Attention Flow
     """
 
-    def __init__(self, v_size, q_size, output_size, num_head, drop=0.0):
+    def __init__(self, v_size, q_size, output_size, num_head, drop=0.0, downsampled_size = 256):
         super(InterModalityUpdate, self).__init__()
         self.v_size = v_size
         self.q_size = q_size
+        self.downsampled_size = downsampled_size
         self.output_size = output_size
         self.num_head = num_head
 
-        self.v_lin = nn.Linear(v_size, output_size * 3)
-        self.q_lin = nn.Linear(q_size, output_size * 3)
+        #self.v_size = [batch, channels, h*w] >> h*w = 4096
+        self.downsample_content = []
+
+        self.downsample_content += [nn.Conv2d(256, 256, 4, 2, 1,bias=True)]
+        self.downsample_content += [nn.InstanceNorm2d(256)]
+        self.downsample_content += [nn.ReLU(inplace=True)]
+        self.downsample_content += [nn.Conv2d(256, 256, 4, 2, 1,bias=True)]
+        self.downsample_content += [nn.InstanceNorm2d(256)]
+        self.downsample_content += [nn.ReLU(inplace=True)]
+        self.downsample_content = nn.Sequential(*self.downsample_content)
+
+        self.map_style = []
+        self.map_style += [nn.Conv2d(256, 256, 1, bias=True)]
+        self.map_style += [nn.ReLU(inplace=True)]
+        self.map_style = nn.Sequential(*self.map_style)
+
+        # self.v_lin = nn.Linear(v_size, output_size * 3)
+        # self.q_lin = nn.Linear(q_size, output_size * 3)
+
+        self.v_lin = nn.Linear(self.downsampled_size, output_size * 3)
+        self.q_lin = nn.Linear(self.downsampled_size, output_size * 3)
+
 
         # self.v_output = nn.Linear(output_size + v_size, output_size)
         # self.q_output = nn.Linear(output_size + q_size, output_size)
@@ -224,7 +390,19 @@ class InterModalityUpdate(nn.Module):
         v: visual feature      [batch, num_obj, feat_size]
         q: question            [batch, max_len, feat_size]
         """
-        batch_size, num_obj, _ = v.shape
+        # batch_size, num_obj, _ = v.shape
+        v_origin = v.view(v.size(0), v.size(1), -1)
+        q_origin = q.view(q.size(0), q.size(1), -1)
+
+
+        v = self.downsample_content(v)
+        q = self.map_style(q)
+
+        h, w = v.size(2), v.size(3)
+        v = v.view(v.size(0), v.size(1), -1)
+        q = q.view(q.size(0), q.size(1), -1)
+
+
         # transfor features
         v_trans = self.v_lin(self.drop(self.relu(v)))
         q_trans = self.q_lin(self.drop(self.relu(q)))
@@ -256,8 +434,11 @@ class InterModalityUpdate(nn.Module):
             v_update = interMAF_q2v @ qv_slice if (i == 0) else torch.cat((v_update, interMAF_q2v @ qv_slice), dim=2)
             q_update = interMAF_v2q @ vv_slice if (i == 0) else torch.cat((q_update, interMAF_v2q @ vv_slice), dim=2)
         # update new feature
-        cat_v = torch.cat((v, v_update), dim=2)
-        cat_q = torch.cat((q, q_update), dim=2)
+        # cat_v = torch.cat((v, v_update), dim=2)
+        # cat_q = torch.cat((q, q_update), dim=2)
+        cat_v = torch.cat((v_origin, v_update), dim=2)
+        cat_q = torch.cat((q_origin, q_update), dim=2)
+
         updated_v = self.v_output(self.drop(cat_v))
         updated_q = self.q_output(self.drop(cat_q))
         return updated_v, updated_q

@@ -105,14 +105,18 @@ class AttnGen(nn.Module):
 
         # content encoder
         self.enc_content = ContentEncoder(n_downsample, n_res, input_dim, dim, 'in', activ, pad_type=pad_type)
-        self.dec = Decoder(n_downsample, n_res, self.enc_content.output_dim, input_dim, res_norm='in', activ=activ, pad_type=pad_type)
+        self.dec = Decoder(n_downsample, n_res, self.enc_content.output_dim, input_dim, res_norm='none', activ=activ, pad_type=pad_type)
 
-        #attention network
-        self.attention_net = \
-            attention.InterModalityUpdate(
-                64*64,
-                16*16,
-                output_size=16*16,num_head=8)
+        # #attention network
+        # self.attention_net = \
+        #     attention.InterModalityUpdate(
+        #         64*64,
+        #         16*16,
+        #         output_size=16*16,num_head=8)
+
+        self.attention_net = attention.ASquare(dim*(2**n_downsample),dim*(2**n_downsample)//2)
+
+
 
     def forward(self, images):
         # reconstruct an image
@@ -129,20 +133,20 @@ class AttnGen(nn.Module):
     def decode(self, content, style):
         # decode content and style codes to an image
 
-        content = self.get_attention(content,style)
-        images = self.dec(content)
+        content_update, style_update = self.get_attention(content,style)
+        images = self.dec(content + content_update)
         return images
 
     def get_attention(self,content,style):
         h,w = content.size(2),content.size(3)
-        content = content.view(content.size(0),content.size(1),-1)
-        style = style.view(style.size(0),style.size(1),-1)
+        # content = content.view(content.size(0),content.size(1),-1)
+        # style = style.view(style.size(0),style.size(1),-1)
 
         ##############
         #attention
         content_update, style_update = self.attention_net(content,style)
-        content_update = content_update.view(content_update.size(0),content_update.size(1),h,w)
-        return content_update
+        # content_update = content_update.view(content_update.size(0),content_update.size(1),h,w)
+        return content_update, style_update
 
 
 class AdaINGen(nn.Module):
@@ -285,11 +289,16 @@ class AttnGenStyleEncoder(nn.Module):
         super(AttnGenStyleEncoder, self).__init__()
         self.model = []
         self.model += [Conv2dBlock(input_dim, dim, 7, 1, 3, norm=norm, activation=activ, pad_type=pad_type)]
-        for i in range(2):
+        # for i in range(2):
+        #     self.model += [Conv2dBlock(dim, 2 * dim, 4, 2, 1, norm=norm, activation=activ, pad_type=pad_type)]
+        #     dim *= 2
+        # for i in range(n_downsample - 2):
+        #     self.model += [Conv2dBlock(dim, dim, 4, 2, 1, norm=norm, activation=activ, pad_type=pad_type)]
+        for i in range(n_downsample):
             self.model += [Conv2dBlock(dim, 2 * dim, 4, 2, 1, norm=norm, activation=activ, pad_type=pad_type)]
             dim *= 2
-        for i in range(n_downsample - 2):
-            self.model += [Conv2dBlock(dim, dim, 4, 2, 1, norm=norm, activation=activ, pad_type=pad_type)]
+        # residual blocks
+        self.model += [ResBlocks(4, dim, norm=norm, activation=activ, pad_type=pad_type)]
 
         # self.model += [nn.AdaptiveAvgPool2d(1)] # global average pooling
         # self.model += [nn.Conv2d(dim, style_dim, 1, 1, 0)]
@@ -297,6 +306,7 @@ class AttnGenStyleEncoder(nn.Module):
         self.output_dim = dim
 
     def forward(self, x):
+
         return self.model(x)
 
 

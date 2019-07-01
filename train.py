@@ -22,6 +22,7 @@ parser.add_argument('--config', type=str, default='configs/edges2handbags_folder
 parser.add_argument('--output_path', type=str, default='.', help="outputs path")
 parser.add_argument("--resume", action="store_true")
 parser.add_argument('--trainer', type=str, default='MUNIT', help="MUNIT|UNIT")
+parser.add_argument('--name',type=str)
 opts = parser.parse_args()
 
 cudnn.benchmark = True
@@ -47,7 +48,8 @@ test_display_images_a = torch.stack([test_loader_a.dataset[i] for i in range(dis
 test_display_images_b = torch.stack([test_loader_b.dataset[i] for i in range(display_size)]).cuda()
 
 # Setup logger and output folders
-model_name = os.path.splitext(os.path.basename(opts.config))[0]
+# model_name = os.path.splitext(os.path.basename(opts.config))[0]
+model_name = opts.name
 train_writer = tensorboardX.SummaryWriter(os.path.join(opts.output_path + "/logs", model_name))
 output_directory = os.path.join(opts.output_path + "/outputs", model_name)
 checkpoint_directory, image_directory = prepare_sub_folder(output_directory)
