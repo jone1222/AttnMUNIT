@@ -5,7 +5,7 @@
 image_save_iter: 1000        # How often do you want to save output images during training
 image_display_iter: 500       # How often do you want to display output images during training
 display_size: 16              # How many images do you want to display each time
-snapshot_save_iter: 10000     # How often do you want to save trained models
+snapshot_save_iter: 2000     # How often do you want to save trained models
 log_iter: 10                  # How often do you want to log the training stats
 
 # optimization options
@@ -26,11 +26,11 @@ recon_c_w: 1                  # weight of content reconstruction loss
 recon_x_cyc_w: 0              # weight of explicit style augmented cycle consistency loss
 vgg_w: 0                      # weight of domain-invariant perceptual loss
 ms_w : 0                      # weight of mode seeking loss
-
+kl_w : 0.01                    # weight of kl loss
 
 # model options
 gen:
-  dim: 64                     # number of filters in the bottommost layer
+  dim: 32                     # number of filters in the bottommost layer
   mlp_dim: 256                # number of filters in MLP
   style_dim: 8                # length of style code
   activ: relu                 # activation function [relu/lrelu/prelu/selu/tanh]

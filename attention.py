@@ -9,14 +9,101 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.nn.init as init
-from torch.autograd import Variable
-from torch.nn.utils import weight_norm
-from torch.nn.utils.rnn import pack_padded_sequence
+
+from PIL import Image
+import numpy as np
+from scipy.misc import imread, imresize
+import cv2
+from torchvision import utils
+import pdb
 
 # from utils import get_config
 # config = get_config(opts.config)
 
 
+
+
+
+def visualize_attention_map(x_a, x_b, gen_a, gen_b, scale_factor=16):
+    # for i in range(x_a.size(0)):
+
+
+    c_a, s_a = gen_a.encode(x_a)
+    c_b, s_b = gen_b.encode(x_b)
+
+    x_ab = gen_b.decode(c_a, s_b)
+    x_ba = gen_a.decode(c_b, s_a)
+
+    gather_out_ab, distrib_out_ab = get_attention_from_generator(x_a.squeeze(0),x_b.squeeze(0),gen_b, scale_factor=scale_factor)
+    gather_out_ba, distrib_out_ba = get_attention_from_generator(x_a.squeeze(0),x_b.squeeze(0),gen_a, scale_factor=scale_factor)
+
+    return gather_out_ab,distrib_out_ab,gather_out_ba,distrib_out_ba
+
+def get_attention_from_generator(x_a,x_b,net_g, scale_factor):
+    alpha_gathering, alpha_distribute = net_g.get_attention()
+
+    gather_out = visualize_attention(x_a,x_b,alpha_gathering, scale_factor, shape_dim=5)
+    distrib_out = visualize_attention(x_a,x_b,alpha_distribute, scale_factor, shape_dim=5)
+
+    return gather_out, distrib_out
+
+def visualize_attention(x_a,x_b,alpha, scale_factor, shape_dim=5):
+    # output : numpy concatenated image 8*64
+
+    if shape_dim == 5:
+        # attention map shape --> batch, k , channels, h, w
+        # 1 x 2 x 512 x 16 x 16
+        # content_map, style_map = torch.split(alpha,1,dim=1)
+        # content_map = content_map.squeeze(0)
+        # style_map = style
+
+        # batch, channels, h, w
+        attention_map = alpha.squeeze(0)
+    else:
+        attention_map = alpha
+
+    # up = torch.nn.Upsample(scale_factor=scale_factor, mode='bilinear')
+    # upsampled_map = up(attention_map)
+
+
+    c_attention, s_attention = np.split(attention_map,2,axis=0)
+
+    c_attn = cv2.resize(c_attention.reshape(16, 16, -1), (256, 256))
+    c_attn_image_lst = draw_attention(x_a, c_attn)
+
+    s_attn = cv2.resize(s_attention.reshape(16, 16, -1), (256, 256))
+    s_attn_image_lst = draw_attention(x_b, s_attn)
+
+    # pdb.set_trace()
+    # upsampled_map = torch.nn.functional.interpolate(attention_map,scale_factor=scale_factor)
+    # gaussian noise ?
+    # output_map = upsampled_map
+    attn_img_lst = [c_attn_image_lst, s_attn_image_lst]
+    return attn_img_lst
+
+def draw_attention(image,alpha_map,smooth = True):
+    #channel-wise attention map
+    alpha_map_lst = np.split(alpha_map, alpha_map.shape[2], axis=2)
+    # pdb.set_trace()
+
+    output_img_lst = []
+    for alpha_map in alpha_map_lst:
+
+        # alpha_map = alpha_map.squeeze(2)
+        alpha_map = alpha_map - np.min(alpha_map)
+        alpha_map = alpha_map / np.max(alpha_map)
+
+        # pdb.set_trace()
+        masked_img = np.multiply(((image*256)-1).permute(1,2,0),alpha_map)
+        output_img_lst.append(masked_img)
+
+        # cv2.imwrite('con_attn.jpg', masked_img)
+        # utils.save_image(torch.from_numpy(masked_img),'cam.jpg')
+    #
+    # image = Image.fromarray(image.numpy())
+
+    #alpha map : batch, size, asdf
+    return output_img_lst
 
 class ContentStyleAttentionblock(nn.Module):
     def __init__(self, dim, norm='in'):
@@ -137,7 +224,10 @@ class ASquare(nn.Module):
 
         content_update, style_update = torch.split(output, 1, dim=0)
 
-        return (content_update, style_update)
+        alpha_gathering = softmax_pi.contiguous().view( batch, self.K, self.c_m, h, w )
+        alpha_distribute = softmax_g.contiguous().view( batch, self.K, self.c_m, h, w )
+
+        return content_update, style_update, alpha_gathering, alpha_distribute
 
 
 

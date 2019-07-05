@@ -8,6 +8,7 @@ import torch
 import torch.nn.functional as F
 
 import attention
+import numpy as np
 
 
 try:
@@ -133,20 +134,32 @@ class AttnGen(nn.Module):
     def decode(self, content, style):
         # decode content and style codes to an image
 
-        content_update, style_update = self.get_attention(content,style)
+        content_update, style_update = self.update_feature(content,style)
+
         images = self.dec(content + content_update)
         return images
 
-    def get_attention(self,content,style):
+    def update_feature(self,content,style):
         h,w = content.size(2),content.size(3)
         # content = content.view(content.size(0),content.size(1),-1)
         # style = style.view(style.size(0),style.size(1),-1)
 
         ##############
         #attention
-        content_update, style_update = self.attention_net(content,style)
+        content_update, style_update,alpha_gathering,alpha_distribute = self.attention_net(content,style)
+
+        # self.alpha_gathering = alpha_gathering
+        # self.alpha_distribute = alpha_distribute
+        self.alpha_gathering = alpha_gathering.cpu().data.numpy()
+        self.alpha_distribute = alpha_distribute.cpu().data.numpy()
+
         # content_update = content_update.view(content_update.size(0),content_update.size(1),h,w)
         return content_update, style_update
+    def get_attention(self):
+        return self.alpha_gathering, self.alpha_distribute
+
+
+
 
 
 class AdaINGen(nn.Module):

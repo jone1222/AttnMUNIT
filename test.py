@@ -13,6 +13,29 @@ import torch
 import os
 from torchvision import transforms
 from PIL import Image
+import attention
+import cv2
+
+
+def save_attn_img(con_sty_attn_lst,attn_path):
+    con_attn_lst, sty_attn_lst = con_sty_attn_lst[0], con_sty_attn_lst[1]
+
+    #save content_img
+
+
+    for idx in range(len(con_attn_lst)):
+
+        attn_img = con_attn_lst[idx].cpu().data.numpy()
+        path = os.path.join(attn_path, 'content_attn{:03d}.jpg'.format(idx))
+        # Image.fromarray(attn_img.astype('uint8')).save(path)
+        cv2.imwrite(path, cv2.cvtColor(attn_img,cv2.COLOR_BGR2RGB))
+
+    for idx in range(len(sty_attn_lst)):
+        attn_img = sty_attn_lst[idx].cpu().data.numpy()
+        path = os.path.join(attn_path, 'style_attn{:03d}.jpg'.format(idx))
+        # Image.fromarray(attn_img.astype('uint8')).save(path)
+        cv2.imwrite(path, cv2.cvtColor(attn_img,cv2.COLOR_BGR2RGB))
+
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--config', type=str, help="net configuration")
@@ -66,6 +89,10 @@ style_encode = trainer.gen_b.encode if opts.a2b else trainer.gen_a.encode # enco
 decode = trainer.gen_b.decode if opts.a2b else trainer.gen_a.decode # decode function
 style_decode = trainer.gen_a.decode if opts.a2b else trainer.gen_b.decode # decode function
 
+
+num_channels = int(config['gen']['dim']*(2**config['gen']['n_downsample']))
+hw_latent = int(config['crop_image_height']/(2**config['gen']['n_downsample']))
+
 if 'new_size' in config:
     new_size = config['new_size']
 else:
@@ -86,7 +113,7 @@ with torch.no_grad():
 
     if opts.trainer == 'MUNIT':
         # style_rand = Variable(torch.randn(opts.num_style, style_dim, 1, 1).cuda())
-        style_rand = Variable(torch.randn(opts.num_style, 256, 16, 16).cuda())
+        style_rand = Variable(torch.randn(opts.num_style, num_channels, hw_latent, hw_latent).cuda())
         if opts.style != '':
             _content, style = style_encode(style_image)
         else:
@@ -102,6 +129,21 @@ with torch.no_grad():
             outputs = (outputs + 1) / 2.
             path = os.path.join(opts.output_folder, 'output{:03d}.jpg'.format(j))
             vutils.save_image(outputs.data, path, padding=0, normalize=True)
+
+            #attention map of style
+            gather_out_ab,distrib_out_ab,gather_out_ba,distrib_out_ba = \
+                attention.visualize_attention_map(image, style_image, trainer.gen_a, trainer.gen_b, scale_factor=(2**config['gen']['n_downsample']))
+
+            # gather_con_ab, gather_sty_ab = gather_out_ab[0], gather_out_ab[1]
+            # for idx in range(len(gather_con_ab)):
+            #     attn_img = gather_con_ab[idx].cpu().data.numpy()
+            #     attn_path = os.path.join(opts.output_folder, 'attn_images/gather_con_ab/attn{:03d}.jpg'.format(idx))
+            #     imwrite(attn_path,attn_img)
+            #
+            save_attn_img(gather_out_ab,os.path.join(opts.output_folder, 'attn_images/gather_ab/'))
+            save_attn_img(gather_out_ba,os.path.join(opts.output_folder, 'attn_images/gather_ba/'))
+            save_attn_img(distrib_out_ab,os.path.join(opts.output_folder, 'attn_images/distrib_ab/'))
+            save_attn_img(distrib_out_ba,os.path.join(opts.output_folder, 'attn_images/distrib_ba/'))
 
             #recon input with random_style
             recon_style = style_decode(content,s)
@@ -124,6 +166,4 @@ with torch.no_grad():
         vutils.save_image(image.data, os.path.join(opts.output_folder, 'input.jpg'), padding=0, normalize=True)
         # also save recon image
         vutils.save_image(recon_input.data, os.path.join(opts.output_folder, 'recon_input.jpg'), padding=0, normalize=True)
-
-
 

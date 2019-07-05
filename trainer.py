@@ -8,6 +8,7 @@ from torch.autograd import Variable
 import torch
 import torch.nn as nn
 import os
+import attention
 
 class MUNIT_Trainer(nn.Module):
     def __init__(self, hyperparameters):
@@ -30,9 +31,12 @@ class MUNIT_Trainer(nn.Module):
         # self.s_a = torch.randn(display_size, self.style_dim, 1, 1).cuda()
         # self.s_b = torch.randn(display_size, self.style_dim, 1, 1).cuda()
 
+        self.num_channels = int(hyperparameters['gen']['dim']*(2**hyperparameters['gen']['n_downsample']))
+        self.hw_latent = int(hyperparameters['crop_image_height']/(2**hyperparameters['gen']['n_downsample']))
+
         # AttnGen Style Shape --> x.size(0) x 256 x 16 x 16
-        self.s_a = Variable(torch.randn(display_size, 1024, 16, 16).cuda())
-        self.s_b = Variable(torch.randn(display_size, 1024, 16, 16).cuda())
+        self.s_a = Variable(torch.randn(display_size, self.num_channels, self.hw_latent, self.hw_latent).cuda())
+        self.s_b = Variable(torch.randn(display_size, self.num_channels, self.hw_latent, self.hw_latent).cuda())
 
 
         # Setup the optimizers
@@ -62,6 +66,17 @@ class MUNIT_Trainer(nn.Module):
     def recon_criterion(self, input, target):
         return torch.mean(torch.abs(input - target))
 
+    def __compute_kl(self, mu):
+        # def _compute_kl(self, mu, sd):
+        # mu_2 = torch.pow(mu, 2)
+        # sd_2 = torch.pow(sd, 2)
+        # encoding_loss = (mu_2 + sd_2 - torch.log(sd_2)).sum() / mu_2.size(0)
+        # return encoding_loss
+
+        mu_2 = torch.pow(mu, 2)
+        encoding_loss = torch.mean(mu_2)
+        return encoding_loss
+
     def forward(self, x_a, x_b):
         self.eval()
         s_a = Variable(self.s_a)
@@ -79,12 +94,12 @@ class MUNIT_Trainer(nn.Module):
         # s_b = Variable(torch.randn(x_b.size(0), self.style_dim, 1, 1).cuda())
 
         # AttnGen Style Shape --> x.size(0)=opt.batch_size x 256 x 16 x 16gen
-        s_a = Variable(torch.randn(x_a.size(0), 1024, 16, 16).cuda())
-        s_b = Variable(torch.randn(x_b.size(0), 1024, 16, 16).cuda())
+        s_a = Variable(torch.randn(x_a.size(0), self.num_channels, self.hw_latent, self.hw_latent).cuda())
+        s_b = Variable(torch.randn(x_b.size(0), self.num_channels, self.hw_latent, self.hw_latent).cuda())
 
         # random_variable for mode_seeking loss
-        s_a_2 = Variable(torch.randn(x_a.size(0), 1024, 16, 16).cuda())
-        s_b_2 = Variable(torch.randn(x_b.size(0), 1024, 16, 16).cuda())
+        s_a_2 = Variable(torch.randn(x_a.size(0), self.num_channels, self.hw_latent, self.hw_latent).cuda())
+        s_b_2 = Variable(torch.randn(x_b.size(0), self.num_channels, self.hw_latent, self.hw_latent).cuda())
 
         # encode
         c_a, s_a_prime = self.gen_a.encode(x_a)
@@ -122,6 +137,10 @@ class MUNIT_Trainer(nn.Module):
         # domain-invariant perceptual loss
         self.loss_gen_vgg_a = self.compute_vgg_loss(self.vgg, x_ba, x_b) if hyperparameters['vgg_w'] > 0 else 0
         self.loss_gen_vgg_b = self.compute_vgg_loss(self.vgg, x_ab, x_a) if hyperparameters['vgg_w'] > 0 else 0
+
+        #kl loss
+        self.loss_gen_recon_kl_s_a = self.__compute_kl(s_a_prime)
+        self.loss_gen_recon_kl_s_b = self.__compute_kl(s_b_prime)
 
         # mode seeking loss
         # mode seeking loss for A-->B and B-->A
@@ -162,7 +181,9 @@ class MUNIT_Trainer(nn.Module):
                               hyperparameters['vgg_w'] * self.loss_gen_vgg_a + \
                               hyperparameters['vgg_w'] * self.loss_gen_vgg_b + \
                               hyperparameters['ms_w'] * self.loss_lz_AB + \
-                              hyperparameters['ms_w'] * self.loss_lz_BA
+                              hyperparameters['ms_w'] * self.loss_lz_BA + \
+                              hyperparameters['kl_w'] * self.loss_gen_recon_kl_s_a + \
+                              hyperparameters['kl_w'] * self.loss_gen_recon_kl_s_b
 
         self.loss_gen_total.backward()
         self.gen_opt.step()
@@ -174,6 +195,8 @@ class MUNIT_Trainer(nn.Module):
         target_fea = vgg(target_vgg)
         return torch.mean((self.instancenorm(img_fea) - self.instancenorm(target_fea)) ** 2)
 
+
+
     def sample(self, x_a, x_b):
         self.eval()
         s_a1 = Variable(self.s_a)
@@ -183,8 +206,8 @@ class MUNIT_Trainer(nn.Module):
         # s_b2 = Variable(torch.randn(x_b.size(0), self.style_dim, 1, 1).cuda())
 
         # AttnGen Style Shape --> x.size(0) x 256 x 16 x 16
-        s_a2 = Variable(torch.randn(x_a.size(0), 1024, 16, 16).cuda())
-        s_b2 = Variable(torch.randn(x_b.size(0), 1024, 16, 16).cuda())
+        s_a2 = Variable(torch.randn(x_a.size(0), self.num_channels, self.hw_latent, self.hw_latent).cuda())
+        s_b2 = Variable(torch.randn(x_b.size(0), self.num_channels, self.hw_latent, self.hw_latent).cuda())
 
         x_a_recon, x_b_recon, x_ba1, x_ba2, x_ab1, x_ab2 = [], [], [], [], [], []
         for i in range(x_a.size(0)):
@@ -199,6 +222,7 @@ class MUNIT_Trainer(nn.Module):
         x_a_recon, x_b_recon = torch.cat(x_a_recon), torch.cat(x_b_recon)
         x_ba1, x_ba2 = torch.cat(x_ba1), torch.cat(x_ba2)
         x_ab1, x_ab2 = torch.cat(x_ab1), torch.cat(x_ab2)
+
         self.train()
         return x_a, x_a_recon, x_ab1, x_ab2, x_b, x_b_recon, x_ba1, x_ba2
 
@@ -208,8 +232,8 @@ class MUNIT_Trainer(nn.Module):
         # s_b = Variable(torch.randn(x_b.size(0), self.style_dim, 1, 1).cuda())
 
         # AttnGen Style Shape --> x.size(0) x 256 x 16 x 16
-        s_a = Variable(torch.randn(x_a.size(0), 1024, 16, 16).cuda())
-        s_b = Variable(torch.randn(x_b.size(0), 1024, 16, 16).cuda())
+        s_a = Variable(torch.randn(x_a.size(0), self.num_channels, self.hw_latent, self.hw_latent).cuda())
+        s_b = Variable(torch.randn(x_b.size(0), self.num_channels, self.hw_latent, self.hw_latent).cuda())
 
         # encode
         c_a, _ = self.gen_a.encode(x_a)
@@ -315,6 +339,7 @@ class UNIT_Trainer(nn.Module):
         # sd_2 = torch.pow(sd, 2)
         # encoding_loss = (mu_2 + sd_2 - torch.log(sd_2)).sum() / mu_2.size(0)
         # return encoding_loss
+
         mu_2 = torch.pow(mu, 2)
         encoding_loss = torch.mean(mu_2)
         return encoding_loss
