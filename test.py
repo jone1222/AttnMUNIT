@@ -4,7 +4,7 @@ Licensed under the CC BY-NC-SA 4.0 license (https://creativecommons.org/licenses
 """
 from __future__ import print_function
 from utils import get_config, pytorch03_to_pytorch04
-from trainer import MUNIT_Trainer, UNIT_Trainer
+from trainer import MUNIT_Trainer, UNIT_Trainer, AttnMUNIT_Trainer
 import argparse
 from torch.autograd import Variable
 import torchvision.utils as vutils
@@ -18,6 +18,10 @@ import cv2
 
 
 def save_attn_img(con_sty_attn_lst,attn_path):
+
+    if not os.path.exists(attn_path):
+        os.mkdir(attn_path)
+
     con_attn_lst, sty_attn_lst = con_sty_attn_lst[0], con_sty_attn_lst[1]
 
     #save content_img
@@ -49,7 +53,9 @@ parser.add_argument('--num_style',type=int, default=10, help="number of styles t
 parser.add_argument('--synchronized', action='store_true', help="whether use synchronized style code or not")
 parser.add_argument('--output_only', action='store_true', help="whether use synchronized style code or not")
 parser.add_argument('--output_path', type=str, default='.', help="path for logs, checkpoints, and VGG model weight")
-parser.add_argument('--trainer', type=str, default='MUNIT', help="MUNIT|UNIT")
+parser.add_argument('--trainer', type=str, default='MUNIT', help="AdaINAttnMUNIT|AttnMUNIT|MUNIT|UNIT")
+parser.add_argument('--discriminator', type=str, default='MsImage',help="MsImage|SelfATtn")
+parser.add_argument('--attention', type=str, default="ConSty", help="ConSty|AdaINAttn|ASquare")
 opts = parser.parse_args()
 
 
@@ -63,15 +69,19 @@ if not os.path.exists(opts.output_folder):
 config = get_config(opts.config)
 opts.num_style = 1 if opts.style != '' else opts.num_style
 
+
 # Setup model and data loader
-config['vgg_model_path'] = opts.output_path
 if opts.trainer == 'MUNIT':
     style_dim = config['gen']['style_dim']
     trainer = MUNIT_Trainer(config)
 elif opts.trainer == 'UNIT':
     trainer = UNIT_Trainer(config)
+elif opts.trainer == 'AttnMUNIT':
+    trainer = AttnMUNIT_Trainer(config,opts.discriminator,opts.attention)
 else:
-    sys.exit("Only support MUNIT|UNIT")
+    sys.exit("Only support AttnMUNIT|MUNIT|UNIT")
+# elif opts.trainer == 'AdaINAttnMUNIT':
+#     trainer = AdaINAttnMUNIT_Trainer(config)
 
 try:
     state_dict = torch.load(opts.checkpoint)
@@ -89,9 +99,17 @@ style_encode = trainer.gen_b.encode if opts.a2b else trainer.gen_a.encode # enco
 decode = trainer.gen_b.decode if opts.a2b else trainer.gen_a.decode # decode function
 style_decode = trainer.gen_a.decode if opts.a2b else trainer.gen_b.decode # decode function
 
+num_channels = 0
+hw_latent = 0
+style_dim = 8
 
-num_channels = int(config['gen']['dim']*(2**config['gen']['n_downsample']))
-hw_latent = int(config['crop_image_height']/(2**config['gen']['n_downsample']))
+
+if opts.trainer == 'AttnMUNIT':
+    num_channels = int(config['gen']['dim']*(2**config['gen']['n_downsample']))
+    hw_latent = int(config['crop_image_height']/(2**config['gen']['n_downsample']))
+elif opts.trainer == 'MUNIT':
+    num_channels = style_dim
+    hw_latent = 1
 
 if 'new_size' in config:
     new_size = config['new_size']
@@ -101,49 +119,90 @@ else:
     else:
         new_size = config['new_size_b']
 
+activation = {}
+weight = {}
+def get_activation(name):
+    def hook(model,input,output):
+        activation[name] = output.detach()
+    return hook
+
+
 with torch.no_grad():
-    transform = transforms.Compose([transforms.Resize(new_size),
-                                    transforms.ToTensor(),
+    transform = transforms.Compose([transforms.ToTensor(),
                                     transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))])
-    image = Variable(transform(Image.open(opts.input).convert('RGB')).unsqueeze(0).cuda())
-    style_image = Variable(transform(Image.open(opts.style).convert('RGB')).unsqueeze(0).cuda()) if opts.style != '' else None
+
+    # transform = transforms.Compose([transforms.Resize(new_size),
+    #                                 transforms.ToTensor(),
+    #                                 transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))])
+    # image = Variable(transform(Image.open(opts.input).convert('RGB')).unsqueeze(0).cuda())
+    # import pdb; pdb.set_trace()
+    # style_image = Variable(transform(Image.open(opts.style).convert('RGB')).unsqueeze(0).cuda()) if opts.style != '' else None
+
+    image = Variable(transform(Image.open(opts.input).convert('RGB').resize((new_size,new_size))).unsqueeze(0).cuda())
+    style_image = Variable(transform(Image.open(opts.style).convert('RGB').resize((new_size,new_size))).unsqueeze(0).cuda()) if opts.style != '' else None
 
     # Start testing
     content, _style = encode(image)
 
-    if opts.trainer == 'MUNIT':
-        # style_rand = Variable(torch.randn(opts.num_style, style_dim, 1, 1).cuda())
-        style_rand = Variable(torch.randn(opts.num_style, num_channels, hw_latent, hw_latent).cuda())
+    if opts.trainer in ['AdaINAttnMUNIT','AttnMUNIT','MUNIT']:
+        style_rand, style_rand2 = trainer.get_random_style_code(opts.num_style)
+        # if opts.trainer in ['AdaINAttnMUNIT','MUNIT']:
+        #     style_rand = Variable(torch.randn(opts.num_style, style_dim, 1, 1).cuda())
+        #     style_rand2 = Variable(torch.randn(opts.num_style, style_dim, 1, 1).cuda())
+        # else:
+        #     style_rand = Variable(torch.randn(opts.num_style, num_channels, hw_latent, hw_latent).cuda())
+        #     style_rand2 = Variable(torch.randn(opts.num_style, num_channels, hw_latent, hw_latent).cuda())
+
         if opts.style != '':
             _content, style = style_encode(style_image)
         else:
             style = style_rand
+            style2 = style_rand2
 
         # recon image
         recon_input = style_decode(content, _style)
-
 
         for j in range(opts.num_style):
             s = style[j].unsqueeze(0)
             outputs = decode(content, s)
             outputs = (outputs + 1) / 2.
-            path = os.path.join(opts.output_folder, 'output{:03d}.jpg'.format(j))
+            path = os.path.join(opts.output_folder, 'output1{:03d}.jpg'.format(j))
             vutils.save_image(outputs.data, path, padding=0, normalize=True)
 
-            #attention map of style
-            gather_out_ab,distrib_out_ab,gather_out_ba,distrib_out_ba = \
-                attention.visualize_attention_map(image, style_image, trainer.gen_a, trainer.gen_b, scale_factor=(2**config['gen']['n_downsample']))
+            if opts.style == '':
+                s2 = style2[j].unsqueeze(0)
+                outputs2 = decode(content, s2)
+                outputs2 = (outputs2 + 1) / 2.
+                path2 = os.path.join(opts.output_folder, 'output2{:03d}.jpg'.format(j))
+                vutils.save_image(outputs2.data, path2, padding=0, normalize=True)
 
-            # gather_con_ab, gather_sty_ab = gather_out_ab[0], gather_out_ab[1]
-            # for idx in range(len(gather_con_ab)):
-            #     attn_img = gather_con_ab[idx].cpu().data.numpy()
-            #     attn_path = os.path.join(opts.output_folder, 'attn_images/gather_con_ab/attn{:03d}.jpg'.format(idx))
-            #     imwrite(attn_path,attn_img)
-            #
-            save_attn_img(gather_out_ab,os.path.join(opts.output_folder, 'attn_images/gather_ab/'))
-            save_attn_img(gather_out_ba,os.path.join(opts.output_folder, 'attn_images/gather_ba/'))
-            save_attn_img(distrib_out_ab,os.path.join(opts.output_folder, 'attn_images/distrib_ab/'))
-            save_attn_img(distrib_out_ba,os.path.join(opts.output_folder, 'attn_images/distrib_ba/'))
+            if opts.trainer == 'AttnMUNIT':
+
+                if not os.path.exists(os.path.join(opts.output_folder, 'attn_images/')):
+                    os.mkdir(os.path.join(opts.output_folder, 'attn_images/'))
+
+                if opts.attention == 'ASquare':
+                    # attention map of style
+                    gather_out_ab,distrib_out_ab,gather_out_ba,distrib_out_ba = \
+                        attention.visualize_attention_map(image, style_image, trainer.gen_a, trainer.gen_b, scale_factor=(2**config['gen']['n_downsample']))
+
+                    # gather_con_ab, gather_sty_ab = gather_out_ab[0], gather_out_ab[1]
+                    # for idx in range(len(gather_con_ab)):
+                    #     attn_img = gather_con_ab[idx].cpu().data.numpy()
+                    #     attn_path = os.path.join(opts.output_folder, 'attn_images/gather_con_ab/attn{:03d}.jpg'.format(idx))
+                    #     imwrite(attn_path,attn_img)
+                    #
+
+
+                    save_attn_img(gather_out_ab,os.path.join(opts.output_folder, 'attn_images/gather_ab/'))
+                    save_attn_img(gather_out_ba,os.path.join(opts.output_folder, 'attn_images/gather_ba/'))
+                    save_attn_img(distrib_out_ab,os.path.join(opts.output_folder, 'attn_images/distrib_ab/'))
+                    save_attn_img(distrib_out_ba,os.path.join(opts.output_folder, 'attn_images/distrib_ba/'))
+                elif opts.attention == 'ConSty':
+                    # import pdb
+                    # pdb.set_trace()
+                    # print()
+                    pass
 
             #recon input with random_style
             recon_style = style_decode(content,s)

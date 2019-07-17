@@ -5,7 +5,7 @@ Licensed under the CC BY-NC-SA 4.0 license (https://creativecommons.org/licenses
 from utils import get_all_data_loaders, prepare_sub_folder, write_html, write_loss, get_config, write_2images, Timer
 import argparse
 from torch.autograd import Variable
-from trainer import MUNIT_Trainer, UNIT_Trainer
+from trainer import AttnMUNIT_Trainer,MUNIT_Trainer, UNIT_Trainer
 import torch.backends.cudnn as cudnn
 import torch
 try:
@@ -21,8 +21,10 @@ parser = argparse.ArgumentParser()
 parser.add_argument('--config', type=str, default='configs/edges2handbags_folder.yaml', help='Path to the config file.')
 parser.add_argument('--output_path', type=str, default='.', help="outputs path")
 parser.add_argument("--resume", action="store_true")
-parser.add_argument('--trainer', type=str, default='MUNIT', help="MUNIT|UNIT")
+parser.add_argument('--trainer', type=str, default='MUNIT', help="AdaINAttnMUNIT|AttnMUNIT|MUNIT|UNIT")
 parser.add_argument('--name',type=str)
+parser.add_argument('--discriminator', type=str, default='MsImage',help="MsImage|SelfATtn")
+parser.add_argument('--attention', type=str, default="ConSty", help="ConSty|AdaINAttn|ASquare")
 opts = parser.parse_args()
 
 cudnn.benchmark = True
@@ -38,8 +40,13 @@ if opts.trainer == 'MUNIT':
     trainer = MUNIT_Trainer(config)
 elif opts.trainer == 'UNIT':
     trainer = UNIT_Trainer(config)
+elif opts.trainer == 'AttnMUNIT':
+    trainer = AttnMUNIT_Trainer(config,opts.discriminator,opts.attention)
 else:
-    sys.exit("Only support MUNIT|UNIT")
+    sys.exit("Only support AttnMUNIT|MUNIT|UNIT")
+
+# elif opts.trainer == 'AdaINAttnMUNIT':
+#     trainer = AdaINAttnMUNIT_Trainer(config)
 trainer.cuda()
 train_loader_a, train_loader_b, test_loader_a, test_loader_b = get_all_data_loaders(config)
 train_display_images_a = torch.stack([train_loader_a.dataset[i] for i in range(display_size)]).cuda()
@@ -76,7 +83,6 @@ while True:
         # Write images
         # if (iterations) % 1 == 0:
         if (iterations + 1) % config['image_save_iter'] == 0:
-
             with torch.no_grad():
                 test_image_outputs = trainer.sample(test_display_images_a, test_display_images_b)
                 train_image_outputs = trainer.sample(train_display_images_a, train_display_images_b)

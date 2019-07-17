@@ -30,11 +30,11 @@ kl_w : 0.01                    # weight of kl loss
 
 # model options
 gen:
-  dim: 64                     # number of filters in the bottommost layer
+  dim: 32                     # number of filters in the bottommost layer
   mlp_dim: 256                # number of filters in MLP
   style_dim: 8                # length of style code
   activ: relu                 # activation function [relu/lrelu/prelu/selu/tanh]
-  n_downsample: 2             # number of downsampling layers in content encoder
+  n_downsample: 4             # number of downsampling layers in content encoder
   n_res: 4                    # number of residual blocks in content encoder/decoder
   pad_type: reflect           # padding type [zero/reflect]
 dis:

@@ -20,19 +20,17 @@ import pdb
 # from utils import get_config
 # config = get_config(opts.config)
 
-
-
-
-
 def visualize_attention_map(x_a, x_b, gen_a, gen_b, scale_factor=16):
     # for i in range(x_a.size(0)):
-
 
     c_a, s_a = gen_a.encode(x_a)
     c_b, s_b = gen_b.encode(x_b)
 
     x_ab = gen_b.decode(c_a, s_b)
     x_ba = gen_a.decode(c_b, s_a)
+
+    # import pdb
+    # pdb.set_trace()
 
     gather_out_ab, distrib_out_ab = get_attention_from_generator(x_a.squeeze(0),x_b.squeeze(0),gen_b, scale_factor=scale_factor)
     gather_out_ba, distrib_out_ba = get_attention_from_generator(x_a.squeeze(0),x_b.squeeze(0),gen_a, scale_factor=scale_factor)
@@ -68,10 +66,10 @@ def visualize_attention(x_a,x_b,alpha, scale_factor, shape_dim=5):
 
     c_attention, s_attention = np.split(attention_map,2,axis=0)
 
-    c_attn = cv2.resize(c_attention.reshape(16, 16, -1), (256, 256))
+    c_attn = cv2.resize(c_attention.reshape(16, 16, -1), (x_a.size(1), x_a.size(2)))
     c_attn_image_lst = draw_attention(x_a, c_attn)
 
-    s_attn = cv2.resize(s_attention.reshape(16, 16, -1), (256, 256))
+    s_attn = cv2.resize(s_attention.reshape(16, 16, -1), (x_b.size(1), x_b.size(2)))
     s_attn_image_lst = draw_attention(x_b, s_attn)
 
     # pdb.set_trace()
@@ -93,8 +91,7 @@ def draw_attention(image,alpha_map,smooth = True):
         alpha_map = alpha_map - np.min(alpha_map)
         alpha_map = alpha_map / np.max(alpha_map)
 
-        # pdb.set_trace()
-        masked_img = np.multiply(((image*256)-1).permute(1,2,0),alpha_map)
+        masked_img = np.multiply(((image+1)*128).permute(1,2,0),alpha_map)
         output_img_lst.append(masked_img)
 
         # cv2.imwrite('con_attn.jpg', masked_img)
@@ -104,28 +101,6 @@ def draw_attention(image,alpha_map,smooth = True):
 
     #alpha map : batch, size, asdf
     return output_img_lst
-
-class ContentStyleAttentionblock(nn.Module):
-    def __init__(self, dim, norm='in'):
-        super(StyleAttentionBlock, self).__init__()
-
-        #content --> 256 * 4 * 4
-        #style --> 256 * 1
-
-
-    def forward(self, content, style):
-        #Reshape content -> 256 * 16 // style --> 256 * 1
-        content = content.view(content.size(0),content.size(1),-1)
-
-        #1. expand style feature 256* 1 --> 256 * 16
-
-        #2. element-wise multiplication with content feature --> 256 * 16  .. 256 * 16 --> 256 * 16
-
-        #3. use fc layer 256 * 16 -> 256 * 1
-
-        # softmax 256 * 1
-
-        return
 
 class StyleAttentionBlock(nn.Module):
     def __init__(self,dim,norm='in',is_first_level=True):
@@ -167,6 +142,131 @@ class StyleAttentionBlock(nn.Module):
 
         return content_output, style_output, content_update
 
+class PATNBlock(nn.Module):
+    def __init__(self, con_channels, style_channels, is_con_sty_concat=False):
+        super(PATNBlock,self).__init__()
+
+        self.con_channels = con_channels
+        self.style_channels = style_channels
+
+        self.con_stream = nn.Sequential(
+            nn.Conv2d(in_channels = con_channels,out_channels=con_channels,kernel_size=3,padding=1),
+            nn.InstanceNorm2d(num_features=con_channels),
+            nn.ReLU(),
+            nn.Conv2d(in_channels=con_channels, out_channels=con_channels, kernel_size=3, padding=1),
+            nn.InstanceNorm2d(num_features=con_channels)
+        )
+
+        self.style_stream = nn.Module()
+        if is_con_sty_concat:
+            sty_stream = nn.Sequential(
+                nn.Conv2d(in_channels=con_channels + style_channels, out_channels=con_channels + style_channels,
+                          kernel_size=3, padding=1),
+                nn.InstanceNorm2d(num_features=con_channels + style_channels),
+                nn.ReLU(),
+                nn.Conv2d(in_channels= con_channels + style_channels, out_channels=con_channels, kernel_size=3,
+                          padding=1),
+                nn.InstanceNorm2d(num_features=con_channels)
+            )
+        else:
+            sty_stream = nn.Sequential(
+                nn.Conv2d(in_channels=style_channels, out_channels=style_channels, kernel_size=3, padding=1),
+                nn.InstanceNorm2d(num_features=con_channels),
+                nn.ReLU(),
+                nn.Conv2d(in_channels=style_channels, out_channels=style_channels, kernel_size=3, padding=1),
+                nn.InstanceNorm2d(num_features=con_channels)
+            )
+        self.style_stream = sty_stream
+
+    def forward(self, con, sty):
+        con_out = self.con_stream(con)
+        sty_out = self.sty_stream(sty)
+        torch.nn.functional.sigmoid(sty_out)
+
+
+class ConStyAttention(nn.Module):
+    def __init__(self, con_channels, style_channels, attn_channels):
+        super(ConStyAttention, self).__init__()
+
+        #AttnGAN style attention
+
+        #content --> b * c * w * h
+        #style --> b * c * 1 * 1
+
+        self.con_channels = con_channels
+        self.attn_channels = attn_channels
+        self.style_channels = style_channels
+
+        self.net_sty = nn.Conv2d(self.style_channels, self.attn_channels, kernel_size=1, stride=1, padding=0)
+        self.net_con = nn.Conv2d(self.con_channels, self.attn_channels, kernel_size=1, stride=1, padding=0)
+        self.net_v = nn.Conv2d(self.style_channels, self.style_channels, kernel_size=1, stride=1, padding=0)
+
+        self.gamma = nn.Parameter(torch.zeros(1))
+
+    def forward(self, con, style):
+        b,c,w,h = con.shape
+
+        style_dim = style.size(1) #
+
+        con_q = self.net_con(con)
+        sty_k = self.net_sty(style)
+        # con_v = self.net_v(style)
+
+        con_q_transpose = con_q.view(b, con_q.size(1), -1).permute(0, 2, 1)
+        sty_k = sty_k.view(b,-1,sty_k.size(2)*sty_k.size(3))
+        # import pdb; pdb.set_trace()
+        attn = nn.functional.softmax(torch.bmm(con_q_transpose, sty_k),dim=1)  # b * (h*w) * (h*w)
+
+        # con_v = con_v.view(b, c, h * w)  # b * c * (h*w)
+
+        style_v = self.net_v(style)
+        out = torch.bmm(style_v.view(b,style_v.size(1),-1), attn.permute(0, 2, 1))
+        out = out.view(b, c, w, h)
+
+        out = self.gamma * out + con
+
+        return out, attn
+
+class SelfAttention(nn.Module):
+    def __init__(self, in_channels, attn_channels):
+        super(SelfAttention, self).__init__()
+        self.in_channels = in_channels
+        self.attn_channels = attn_channels
+
+        self.net_q = nn.Conv2d(self.in_channels, self.attn_channels, kernel_size=1, stride=1, padding=0)
+        self.net_k = nn.Conv2d(self.in_channels, self.attn_channels, kernel_size=1, stride=1, padding=0)
+        self.net_v = nn.Conv2d(self.in_channels, self.attn_channels, kernel_size=1, stride=1, padding=0)
+
+        self.softmax = nn.Softmax()
+
+        self.gamma = nn.Parameter(torch.zeros(1))
+
+    def forward(self, input):
+        #input ==> b x c x w x h
+
+        b,c,w,h = input.shape
+
+        q = self.net_q(input)
+        k = self.net_k(input)
+        v = self.net_v(input)
+
+        q_transpose = q.view(b,c,h*w).permute(0,1,2)
+        k = k.view(b,c,h*w)
+
+        attn =  self.softmax(torch.bmm(q_transpose,g)) # b * (h*w) * (h*w)
+
+        v = v.view(b,c,h*w)  # b * c * (h*w)
+
+        out = torch.bmm(v,attn.permute(0,2,1))
+        out = out.view(b,c,w,h)
+
+        out = self.gammaa * out + input
+
+        return out,attn
+
+
+
+
 
 class ASquare(nn.Module):
     def __init__(self,in_channels,attention_dim,k = 2):
@@ -182,6 +282,7 @@ class ASquare(nn.Module):
 
         self.out_conv = nn.Conv2d(self.attention_dim, self.in_channels, kernel_size=1, stride = 1, padding = 0)
 
+        #if K = 1 --> work as Self-ATtention
         self.K = k
 
         self.c_m = self.attention_dim
@@ -190,14 +291,15 @@ class ASquare(nn.Module):
         self.softmax = nn.Softmax()
 
 
-    def forward(self,content,style):
+    def forward(self,content,style=None):
 
         # content = content.view(content.size(0),content.size(1),-1)
         # style = style.view(style.size(0),style.size(1),-1)
 
-
-
-        x = torch.cat((content,style),0)
+        if self.K > 1:
+            x = torch.cat((content,style),0)
+        else:
+            x = content
 
         b, c, h, w = x.size()
 
@@ -222,12 +324,18 @@ class ASquare(nn.Module):
 
         output = self.out_conv(tmpZ)
 
-        content_update, style_update = torch.split(output, 1, dim=0)
+        if self.K > 1:
+            content_update, style_update = torch.split(output, 1, dim=0)
+        else:
+            content_update = output
 
         alpha_gathering = softmax_pi.contiguous().view( batch, self.K, self.c_m, h, w )
         alpha_distribute = softmax_g.contiguous().view( batch, self.K, self.c_m, h, w )
 
-        return content_update, style_update, alpha_gathering, alpha_distribute
+        if self.K > 1:
+            return content_update, style_update, alpha_gathering, alpha_distribute
+        else:
+            return content_update + content
 
 
 
@@ -244,6 +352,7 @@ class ASquare(nn.Module):
         #
         # g_mul_softmax = (theta_mul_pi @ g)
         # g_mul_softmax = g_mul_softmax
+
 
 
 

@@ -30,11 +30,11 @@ kl_w : 0.01                    # weight of kl loss
 
 # model options
 gen:
-  dim: 64                     # number of filters in the bottommost layer
+  dim: 32                     # number of filters in the bottommost layer
   mlp_dim: 256                # number of filters in MLP
   style_dim: 8                # length of style code
   activ: relu                 # activation function [relu/lrelu/prelu/selu/tanh]
-  n_downsample: 2             # number of downsampling layers in content encoder
+  n_downsample: 4             # number of downsampling layers in content encoder
   n_res: 4                    # number of residual blocks in content encoder/decoder
   pad_type: reflect           # padding type [zero/reflect]
 dis:
@@ -53,4 +53,4 @@ num_workers: 8                              # number of data loading threads
 new_size: 256                               # first resize the shortest image side to this size
 crop_image_height: 256                      # random crop image of this height
 crop_image_width: 256                       # random crop image of this width
-data_root: /media/cvpr-gb/84253f44-041b-4a87-a607-45ae94f01669/DataSet/edges2shoes/    # dataset folder location
+data_root: /media/cvpr-gb/84253f44-041b-4a87-a607-45ae94f01669/DataSet/cat2dog/    # dataset folder location
