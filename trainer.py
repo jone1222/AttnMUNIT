@@ -2,7 +2,7 @@
 Copyright (C) 2017 NVIDIA Corporation.  All rights reserved.
 Licensed under the CC BY-NC-SA 4.0 license (https://creativecommons.org/licenses/by-nc-sa/4.0/legalcode).
 """
-from networks import AdaINGen, MsImageDis, VAEGen, AttnGen, AdaINAttnGen, ConStyAttnGen, SelfAttnDis
+from networks import AdaINGen, MsImageDis, VAEGen, AttnGen, AdaINAttnGen, ConStyAttnGen, SelfAttnDis, ChannelwiseAttnGen, ChannelwiseAttnGen_MV
 from utils import weights_init, get_model_list, vgg_preprocess, load_vgg16, get_scheduler, plot_grad_flow
 from torch.autograd import Variable
 import torch
@@ -10,8 +10,9 @@ import torch.nn as nn
 import os
 import attention
 
+
 class AttnMUNIT_Trainer(nn.Module):
-    def __init__(self, hyperparameters,d_network='MsImage',attn_type='ConSty'):
+    def __init__(self, hyperparameters,d_network='MsImage',attn_type='ConSty',concat_type='add',use_self_attention=False,use_adain_each=False):
         super(AttnMUNIT_Trainer, self).__init__()
         lr = hyperparameters['lr']
         # Initiate the networks
@@ -27,12 +28,18 @@ class AttnMUNIT_Trainer(nn.Module):
 
         self.d_network = d_network
         self.attn_type = attn_type
+        self.concat_type = concat_type
+        self.use_self_attention = use_self_attention
+        self.use_adain_each = use_adain_each
+        # import pdb; pdb.set_trace()
 
+        self.content_dim = int(hyperparameters['gen']['dim'] * (2 ** hyperparameters['gen']['n_downsample']))
+        self.content_hw = int(hyperparameters['crop_image_height'] / (2 ** hyperparameters['gen']['n_downsample']))
         self.style_dim = hyperparameters['gen']['style_dim']
 
         if self.attn_type == 'ConSty':
-            self.gen_a = ConStyAttnGen(hyperparameters['input_dim_a'], hyperparameters['gen'])  # auto-encoder for domain a
-            self.gen_b = ConStyAttnGen(hyperparameters['input_dim_b'], hyperparameters['gen'])  # auto-encoder for domain b
+            self.gen_a = ConStyAttnGen(hyperparameters['input_dim_a'], hyperparameters['gen'],self.concat_type)  # auto-encoder for domain a
+            self.gen_b = ConStyAttnGen(hyperparameters['input_dim_b'], hyperparameters['gen'],self.concat_type)  # auto-encoder for domain b
 
             self.s_a = torch.randn(display_size, self.style_dim, 1, 1).cuda()
             self.s_b = torch.randn(display_size, self.style_dim, 1, 1).cuda()
@@ -48,12 +55,25 @@ class AttnMUNIT_Trainer(nn.Module):
             self.gen_a = AttnGen(hyperparameters['input_dim_a'], hyperparameters['gen'])  # auto-encoder for domain a
             self.gen_b = AttnGen(hyperparameters['input_dim_b'], hyperparameters['gen'])  # auto-encoder for domain b
 
-            self.num_channels = int(hyperparameters['gen']['dim'] * (2 ** hyperparameters['gen']['n_downsample']))
-            self.hw_latent = int(hyperparameters['crop_image_height'] / (2 ** hyperparameters['gen']['n_downsample']))
-
             # # AttnGen Style Shape --> x.size(0) x 256 x 16 x 16
-            self.s_a = Variable(torch.randn(display_size, self.num_channels, self.hw_latent, self.hw_latent).cuda())
-            self.s_b = Variable(torch.randn(display_size, self.num_channels, self.hw_latent, self.hw_latent).cuda())
+            self.s_a = Variable(torch.randn(display_size, self.content_dim, self.content_hw, self.content_hw).cuda())
+            self.s_b = Variable(torch.randn(display_size, self.content_dim, self.content_hw, self.content_hw).cuda())
+
+        elif self.attn_type == 'ChannelWise':
+
+            self.gen_a = ChannelwiseAttnGen(hyperparameters['input_dim_a'], hyperparameters['gen'],use_self_attention=self.use_self_attention,use_adain_each=self.use_adain_each)  # auto-encoder for domain a
+            self.gen_b = ChannelwiseAttnGen(hyperparameters['input_dim_b'], hyperparameters['gen'],use_self_attention=self.use_self_attention,use_adain_each=self.use_adain_each)  # auto-encoder for domain b
+
+            self.s_a = torch.randn(display_size, self.style_dim, 1, 1).cuda()
+            self.s_b = torch.randn(display_size, self.style_dim, 1, 1).cuda()
+
+        elif self.attn_type == 'ChannelWise_MV':
+
+            self.gen_a = ChannelwiseAttnGen_MV(hyperparameters['input_dim_a'], hyperparameters['gen'],use_self_attention=self.use_self_attention)  # auto-encoder for domain a
+            self.gen_b = ChannelwiseAttnGen_MV(hyperparameters['input_dim_b'], hyperparameters['gen'],use_self_attention=self.use_self_attention)  # auto-encoder for domain b
+
+            self.s_a = torch.randn(display_size, self.style_dim, 1, 1).cuda()
+            self.s_b = torch.randn(display_size, self.style_dim, 1, 1).cuda()
 
         else:
             self.gen_a = AdaINGen(hyperparameters['input_dim_a'], hyperparameters['gen'])  # auto-encoder for domain a
@@ -69,8 +89,6 @@ class AttnMUNIT_Trainer(nn.Module):
 
 
         self.instancenorm = nn.InstanceNorm2d(512, affine=False)
-
-
 
         # Setup the optimizers
         beta1 = hyperparameters['beta1']
@@ -99,6 +117,16 @@ class AttnMUNIT_Trainer(nn.Module):
     def recon_criterion(self, input, target):
         return torch.mean(torch.abs(input - target))
 
+    def recon_criterion_mask(self,input,target,mask):
+        r'''
+        mask ( N, B, C, 1, 1 )
+        N : Number of masks
+        B : batch size
+        C : # of dimension
+        '''
+
+        return torch.mean(mask * torch.abs(input-target).unsqueeze(0).expand_as(mask))
+
     def __compute_kl(self, mu):
         # def _compute_kl(self, mu, sd):
         # mu_2 = torch.pow(mu, 2)
@@ -122,13 +150,13 @@ class AttnMUNIT_Trainer(nn.Module):
         return x_ab, x_ba
 
     def get_random_style_code(self,batch_size):
-        if self.attn_type in ['ConSty', 'AdaINAttn']:
+        if self.attn_type in ['ConSty', 'AdaINAttn', 'ChannelWise', 'ChannelWise_MV']:
             s_a = torch.randn(batch_size, self.style_dim, 1, 1).cuda()
             s_b = torch.randn(batch_size, self.style_dim, 1, 1).cuda()
         elif self.attn_type == 'ASquare':
             # # AttnGen Style Shape --> x.size(0) x 256 x 16 x 16
-            s_a = Variable(torch.randn(batch_size, self.num_channels, self.hw_latent, self.hw_latent).cuda())
-            s_b = Variable(torch.randn(batch_size, self.num_channels, self.hw_latent, self.hw_latent).cuda())
+            s_a = Variable(torch.randn(batch_size, self.content_dim, self.content_hw, self.content_hw).cuda())
+            s_b = Variable(torch.randn(batch_size, self.content_dim, self.content_hw, self.content_hw).cuda())
         else:
             s_a = torch.randn(batch_size, self.style_dim, 1, 1).cuda()
             s_b = torch.randn(batch_size, self.style_dim, 1, 1).cuda()
@@ -136,11 +164,6 @@ class AttnMUNIT_Trainer(nn.Module):
         return s_a, s_b
     def gen_update(self, x_a, x_b, hyperparameters):
         self.gen_opt.zero_grad()
-
-        s_a = None
-        s_b = None
-        s_a_2 = None
-        s_b_2 = None
 
         display_size = x_a.size(0)
 
@@ -152,6 +175,7 @@ class AttnMUNIT_Trainer(nn.Module):
         # encode
         c_a, s_a_prime = self.gen_a.encode(x_a)
         c_b, s_b_prime = self.gen_b.encode(x_b)
+
         # decode (within domain)
         x_a_recon = self.gen_a.decode(c_a, s_a_prime)
         x_b_recon = self.gen_b.decode(c_b, s_b_prime)
@@ -168,12 +192,19 @@ class AttnMUNIT_Trainer(nn.Module):
         # # mode seeking decode (cross domain)
         # x_ba_2 = self.gen_a.decode(c_b, s_a_2)
         # x_ab_2 = self.gen_b.decode(c_a, s_b_2)
+        mask_list_a = self.gen_a.res_blocks.res_blocks.get_mask_from_model()
+        mask_list_b = self.gen_b.res_blocks.res_blocks.get_mask_from_model()
 
         # reconstruction loss
         self.loss_gen_recon_x_a = self.recon_criterion(x_a_recon, x_a)
         self.loss_gen_recon_x_b = self.recon_criterion(x_b_recon, x_b)
-        self.loss_gen_recon_s_a = self.recon_criterion(s_a_recon, s_a)
-        self.loss_gen_recon_s_b = self.recon_criterion(s_b_recon, s_b)
+        # self.loss_gen_recon_s_a = self.recon_criterion(s_a_recon, s_a)
+        # self.loss_gen_recon_s_b = self.recon_criterion(s_b_recon, s_b)
+
+        #masked style reconstruction loss
+        self.loss_gen_recon_s_a = self.recon_criterion_mask(s_a_recon, s_a, mask_list_a)
+        self.loss_gen_recon_s_b = self.recon_criterion_mask(s_b_recon, s_b, mask_list_b)
+
         self.loss_gen_recon_c_a = self.recon_criterion(c_a_recon, c_a)
         self.loss_gen_recon_c_b = self.recon_criterion(c_b_recon, c_b)
         self.loss_gen_cycrecon_x_a = self.recon_criterion(x_aba, x_a) if hyperparameters['recon_x_cyc_w'] > 0 else 0
@@ -217,8 +248,8 @@ class AttnMUNIT_Trainer(nn.Module):
 
         self.loss_gen_total.backward()
         # import pdb; pdb.set_trace()
-        plot_grad_flow(self.gen_a.named_parameters(),'gen_a_grad_flow.png')
-        plot_grad_flow(self.gen_b.named_parameters(),'gen_b_grad_flow.png')
+        # plot_grad_flow(self.gen_a.named_parameters(),'gen_a_grad_flow.png')
+        # plot_grad_flow(self.gen_b.named_parameters(),'gen_b_grad_flow.png')
         self.gen_opt.step()
 
     def compute_vgg_loss(self, vgg, img, target):
@@ -271,8 +302,8 @@ class AttnMUNIT_Trainer(nn.Module):
         self.loss_dis_b = self.dis_b.calc_dis_loss(x_ab.detach(), x_b)
         self.loss_dis_total = hyperparameters['gan_w'] * self.loss_dis_a + hyperparameters['gan_w'] * self.loss_dis_b
         self.loss_dis_total.backward()
-        plot_grad_flow(self.dis_a.named_parameters(), 'dis_a_grad_flow.png')
-        plot_grad_flow(self.dis_b.named_parameters(), 'dis_b_grad_flow.png')
+        # plot_grad_flow(self.dis_a.named_parameters(), 'dis_a_grad_flow.png')
+        # plot_grad_flow(self.dis_b.named_parameters(), 'dis_b_grad_flow.png')
         self.dis_opt.step()
 
     def update_learning_rate(self):

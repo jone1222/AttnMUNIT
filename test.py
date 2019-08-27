@@ -55,6 +55,7 @@ parser.add_argument('--output_only', action='store_true', help="whether use sync
 parser.add_argument('--output_path', type=str, default='.', help="path for logs, checkpoints, and VGG model weight")
 parser.add_argument('--trainer', type=str, default='MUNIT', help="AdaINAttnMUNIT|AttnMUNIT|MUNIT|UNIT")
 parser.add_argument('--discriminator', type=str, default='MsImage',help="MsImage|SelfATtn")
+parser.add_argument('--concat_type', type=str, default="add", help="add|mul|adain")
 parser.add_argument('--attention', type=str, default="ConSty", help="ConSty|AdaINAttn|ASquare")
 opts = parser.parse_args()
 
@@ -77,7 +78,7 @@ if opts.trainer == 'MUNIT':
 elif opts.trainer == 'UNIT':
     trainer = UNIT_Trainer(config)
 elif opts.trainer == 'AttnMUNIT':
-    trainer = AttnMUNIT_Trainer(config,opts.discriminator,opts.attention)
+    trainer = AttnMUNIT_Trainer(config,opts.discriminator,opts.attention,opts.concat_type)
 else:
     sys.exit("Only support AttnMUNIT|MUNIT|UNIT")
 # elif opts.trainer == 'AdaINAttnMUNIT':
@@ -110,6 +111,7 @@ if opts.trainer == 'AttnMUNIT':
 elif opts.trainer == 'MUNIT':
     num_channels = style_dim
     hw_latent = 1
+
 
 if 'new_size' in config:
     new_size = config['new_size']

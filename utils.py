@@ -177,7 +177,6 @@ def write_loss(iterations, trainer, train_writer):
     for m in members:
         train_writer.add_scalar(m, getattr(trainer, m), iterations + 1)
 
-
 def slerp(val, low, high):
     """
     original: Animating Rotation with Quaternion Curves, Ken Shoemake
@@ -187,7 +186,6 @@ def slerp(val, low, high):
     omega = np.arccos(np.dot(low / np.linalg.norm(low), high / np.linalg.norm(high)))
     so = np.sin(omega)
     return np.sin((1.0 - val) * omega) / so * low + np.sin(val * omega) / so * high
-
 
 def get_slerp_interp(nb_latents, nb_interp, z_dim):
     """
@@ -205,6 +203,36 @@ def get_slerp_interp(nb_latents, nb_interp, z_dim):
         latent_interps = np.vstack((latent_interps, latent_interp))
 
     return latent_interps[:, :, np.newaxis, np.newaxis]
+
+def calc_mean_std(feat, eps=1e-5):
+    size = feat.size()
+    assert (len(size) == 4)
+    N, C = size[:2]
+    feat_var = feat.view(N, C, -1).var(dim=2) + eps
+    feat_std = feat_var.sqrt().view(N, C, 1, 1)
+    feat_mean = feat.view(N,C, -1).mean(dim=2).view(N,C,1,1)
+    return feat_mean, feat_std
+
+def adain(content_feat,style_feat):
+    size = content_feat.size()
+    style_mean, style_std = calc_mean_std(style_feat)
+    content_mean, content_std = calc_mean_std(content_feat)
+
+    normalized_content = (content_feat - content_mean.expand(size)) / content_std.expand(size)
+
+    return normalized_content * style_std.expand(size) + style_mean.expand(size)
+
+
+def adain_mv(content_feat, mean, var):
+    size = content_feat.size()
+
+    content_mean, content_std = calc_mean_std(content_feat)
+
+    std = var.sqrt().view(size[0],size[1],1,1)
+
+    normalized_content = (content_feat - content_mean.expand(size)) / content_std.expand(size)
+
+    return normalized_content * std.expand(size) + mean.expand(size)
 
 
 def plot_grad_flow(named_parameters,plt_name):

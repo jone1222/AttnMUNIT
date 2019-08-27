@@ -24,7 +24,10 @@ parser.add_argument("--resume", action="store_true")
 parser.add_argument('--trainer', type=str, default='MUNIT', help="AdaINAttnMUNIT|AttnMUNIT|MUNIT|UNIT")
 parser.add_argument('--name',type=str)
 parser.add_argument('--discriminator', type=str, default='MsImage',help="MsImage|SelfATtn")
-parser.add_argument('--attention', type=str, default="ConSty", help="ConSty|AdaINAttn|ASquare")
+parser.add_argument('--attention', type=str, default="ConSty", help="ConSty|AdaINAttn|ASquare|ChannelWise")
+parser.add_argument('--concat_type', type=str, default="add", help="add|mul|adain")
+parser.add_argument('--use_self_attention', type=lambda x: (str(x).lower() == 'true'), default=False, help="True|False")
+parser.add_argument('--use_adain_each', type=lambda x: (str(x).lower() == 'true'), default=False, help="True|False")
 opts = parser.parse_args()
 
 cudnn.benchmark = True
@@ -41,7 +44,7 @@ if opts.trainer == 'MUNIT':
 elif opts.trainer == 'UNIT':
     trainer = UNIT_Trainer(config)
 elif opts.trainer == 'AttnMUNIT':
-    trainer = AttnMUNIT_Trainer(config,opts.discriminator,opts.attention)
+    trainer = AttnMUNIT_Trainer(config,opts.discriminator,opts.attention,opts.concat_type,opts.use_self_attention,opts.use_adain_each)
 else:
     sys.exit("Only support AttnMUNIT|MUNIT|UNIT")
 
@@ -79,6 +82,10 @@ while True:
         if (iterations + 1) % config['log_iter'] == 0:
             print("Iteration: %08d/%08d" % (iterations + 1, max_iter))
             write_loss(iterations, trainer, train_writer)
+
+            #check gamma
+            # train_writer.add_scalar("gamma_gen_a", trainer.gen_a.attention_net.gamma, iterations + 1)
+            # train_writer.add_scalar("gamma_gen_b", trainer.gen_b.attention_net.gamma, iterations + 1)
 
         # Write images
         # if (iterations) % 1 == 0:

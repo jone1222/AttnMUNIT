@@ -8,8 +8,9 @@ import torch
 import torch.nn.functional as F
 
 import attention
-import numpy as np
 
+import numpy as np
+import time
 
 try:
     from itertools import izip as zip
@@ -165,9 +166,268 @@ class MsImageDis(nn.Module):
 # Generator
 ##################################################################################
 
+class AdaINResBlocks(nn.Module):
+    def __init__(self,n_res,con_dim,sty_dim):
+        super(AdaINResBlocks,self).__init__()
+
+        self.res_blocks = ResBlocks(n_res,con_dim,norm='adain')
+        self.mlp = nn.Conv2d(sty_dim,con_dim*2,1)
+
+    def forward(self, content, style):
+        adain_params = self.mlp(style)
+
+        self.assign_adain_params(adain_params,self.res_blocks)
+
+        return self.res_blocks(content)
+
+    def assign_adain_params(self, adain_params, model):
+        # assign the adain_params to the AdaIN layers in model
+        for m in model.modules():
+            if m.__class__.__name__ == "AdaptiveInstanceNorm2d":
+                mean = adain_params[:, :m.num_features]
+                std = adain_params[:, m.num_features:2 * m.num_features]
+                m.bias = mean.contiguous().view(-1)
+                m.weight = std.contiguous().view(-1)
+                if adain_params.size(1) > 2 * m.num_features:
+                    adain_params = adain_params[:, 2 * m.num_features:]
+
+    def get_num_adain_params(self, model):
+        # return the number of AdaIN parameters needed by the model
+        num_adain_params = 0
+        for m in model.modules():
+            if m.__class__.__name__ == "AdaptiveInstanceNorm2d":
+                num_adain_params += 2 * m.num_features
+        return num_adain_params
+
+class MaskedAdaINResBlocks(nn.Module):
+    def __init__(self,n_res,con_dim,sty_dim,use_self_attention=False):
+        super(MaskedAdaINResBlocks,self).__init__()
+
+        self.res_blocks = AttnResBlocks(n_res,con_dim,sty_dim,con_dim,norm='adain',use_self_attention=use_self_attention)
+        self.mlp = nn.Conv2d(sty_dim,con_dim*2,1)
+
+    def forward(self, content, style):
+        adain_params = self.mlp(style)
+
+        self.assign_adain_params(adain_params,self.res_blocks)
+
+        return self.res_blocks(content,style)
+
+    def assign_adain_params(self, adain_params, model):
+        # assign the adain_params to the AdaIN layers in model
+        for m in model.modules():
+            if m.__class__.__name__ == "AdaptiveInstanceNorm2d":
+                mean = adain_params[:, :m.num_features]
+                std = adain_params[:, m.num_features:2 * m.num_features]
+                m.bias = mean.contiguous().view(-1)
+                m.weight = std.contiguous().view(-1)
+                if adain_params.size(1) > 2 * m.num_features:
+                    adain_params = adain_params[:, 2 * m.num_features:]
+
+    def get_num_adain_params(self, model):
+        # return the number of AdaIN parameters needed by the model
+        num_adain_params = 0
+        for m in model.modules():
+            if m.__class__.__name__ == "AdaptiveInstanceNorm2d":
+                num_adain_params += 2 * m.num_features
+        return num_adain_params
+
+class MaskedAdaINResBlocks_AdaIN(nn.Module):
+    def __init__(self,n_res,con_dim,sty_dim,use_self_attention=False):
+        super(MaskedAdaINResBlocks_AdaIN,self).__init__()
+
+        self.res_blocks = AttnResBlocks_AdaIN(n_res,con_dim,sty_dim,con_dim,norm='adain',use_self_attention=use_self_attention)
+        self.mlp = nn.Conv2d(sty_dim,con_dim*2,1)
+
+    def forward(self, content, style):
+        return self.res_blocks(content,style)
+
+class MaskedAdaINResBlocks_MV(nn.Module):
+    def __init__(self,n_res,con_dim,sty_dim,use_self_attention=False,n_mapping=0):
+        super(MaskedAdaINResBlocks_MV,self).__init__()
+
+        self.mapping_net = []
+        for i in range(n_mapping):
+            self.mapping_net += [nn.Conv2d(sty_dim,sty_dim,1)]
+        self.mapping_net = nn.Sequential(*self.mapping_net)
+
+        self.res_blocks = AttnResBlocks_MV(n_res,con_dim,sty_dim,con_dim,norm='adain',use_self_attention=use_self_attention)
+
+        self.mlp = nn.Conv2d(sty_dim,con_dim*2,1)
+
+    def forward(self, content, style, content_code):
+        # import pdb; pdb.set_trace()
+        style = self.mapping_net(style)
+
+        adain_params = self.mlp(style)
+        adain_mv_params = self.mlp(content_code)
+
+        self.assign_adain_params(adain_params,self.res_blocks)
+        self.assign_adain_mv_params(adain_mv_params,self.res_blocks)
+
+        return self.res_blocks(content,style)
+
+    def assign_adain_params(self, adain_params, model):
+        # assign the adain_params to the AdaIN layers in model
+        for m in model.modules():
+            if m.__class__.__name__ == "AdaptiveInstanceNorm2d":
+                mean = adain_params[:, :m.num_features]
+                std = adain_params[:, m.num_features:2 * m.num_features]
+                m.bias = mean.contiguous().view(-1)
+                m.weight = std.contiguous().view(-1)
+                if adain_params.size(1) > 2 * m.num_features:
+                    adain_params = adain_params[:, 2 * m.num_features:]
+
+    def assign_adain_mv_params(self, adain_params, model):
+        # assign the adain_params to the AdaIN layers in model
+        for m in model.modules():
+            if m.__class__.__name__ == "AdaIN_MV":
+                mean = adain_params[:, :m.num_features]
+                std = adain_params[:, m.num_features:2 * m.num_features]
+                m.bias = mean.contiguous().view(-1)
+                m.weight = std.contiguous().view(-1)
+                if adain_params.size(1) > 2 * m.num_features:
+                    adain_params = adain_params[:, 2 * m.num_features:]
+
+    def get_num_adain_params(self, model):
+        # return the number of AdaIN parameters needed by the model
+        num_adain_params = 0
+        for m in model.modules():
+            if m.__class__.__name__ == "AdaptiveInstanceNorm2d":
+                num_adain_params += 2 * m.num_features
+        return num_adain_params
+
+
+
+class ConcatNetwork(nn.Module):
+    def __init__(self,con_dim,sty_dim,concat_type):
+        super(ConcatNetwork, self).__init__()
+
+        self.concat_type = concat_type
+        self.concat_network = self.get_concat_network(con_dim,sty_dim)
+
+
+
+        if concat_type == "add":
+            self.concat = torch.add
+        elif concat_type == "mul":
+            self.concat = torch.mul
+        else:
+            self.concat = torch.cat
+
+    def get_concat_network(self, con_dim, sty_dim):
+        if self.concat_type == 'add':
+            network = nn.Conv2d(con_dim, con_dim, 1)
+        elif self.concat_type == 'mul':
+            network = nn.Conv2d(con_dim, con_dim, 1)
+        else:
+            # concat content & style
+            network = nn.Conv2d(con_dim + sty_dim, con_dim, 1)
+
+        return network
+
+    def forward(self, con, style):
+        # con shape 1,256,64,64
+        # style shape 1,256,1,1
+        concat_output = self.concat_network(self.concat(con,style))
+        return self.res_blocks(concat_output)
+
+
+class ChannelwiseAttnGen(nn.Module):
+    # AdaIN auto-encoder architecture
+    def __init__(self, input_dim, params,use_self_attention=False,use_adain_each=False):
+        super(ChannelwiseAttnGen, self).__init__()
+        dim = params['dim']
+        style_dim = params['style_dim']
+        n_downsample = params['n_downsample']
+        n_res = params['n_res']
+        activ = params['activ']
+        pad_type = params['pad_type']
+        n_mapping = params['n_mapping']
+
+        # style encoder
+        self.enc_style = StyleEncoder(4, input_dim, dim, style_dim, norm='none', activ=activ, pad_type=pad_type)
+
+        # content encoder
+        self.enc_content = ContentEncoder(n_downsample, n_res, input_dim, dim, 'in', activ, pad_type=pad_type)
+
+        if use_adain_each:
+            self.res_blocks = MaskedAdaINResBlocks_AdaIN(n_res, dim * (2 ** n_downsample), style_dim,
+                                                   use_self_attention=use_self_attention)
+        else:
+            self.res_blocks = MaskedAdaINResBlocks(n_res,dim*(2**n_downsample),style_dim,use_self_attention=use_self_attention)
+
+        self.dec = Decoder(n_downsample, 0, self.enc_content.output_dim, input_dim, res_norm=params['res_norm'],
+                           activ=activ, pad_type=pad_type)
+
+    def forward(self, images):
+        # reconstruct an image
+        content, style_fake = self.encode(images)
+
+        images_recon = self.decode(content, style_fake)
+        return images_recon
+
+    def encode(self, images):
+        # encode an image to its content and style codes
+        style_fake = self.enc_style(images)
+        content = self.enc_content(images)
+        return content, style_fake
+
+    def decode(self, content, style):
+        # decode content and style codes to an image
+        content = self.res_blocks(content,style)
+        images = self.dec(content)
+        return images
+
+class ChannelwiseAttnGen_MV(nn.Module):
+    # AdaIN auto-encoder architecture
+    def __init__(self, input_dim, params,use_self_attention=False):
+        super(ChannelwiseAttnGen_MV, self).__init__()
+        dim = params['dim']
+        style_dim = params['style_dim']
+        n_downsample = params['n_downsample']
+        n_res = params['n_res']
+        activ = params['activ']
+        pad_type = params['pad_type']
+        n_mapping = params['n_mapping']
+        # style encoder
+        self.enc_style = StyleEncoder(4, input_dim, dim, style_dim, norm='none', activ=activ, pad_type=pad_type, n_mapping=n_mapping)
+
+        # content encoder
+        self.enc_content = ContentEncoder(n_downsample, n_res, input_dim, dim, 'in', activ, pad_type=pad_type)
+
+        self.res_blocks = MaskedAdaINResBlocks_MV(n_res,dim*(2**n_downsample),style_dim,use_self_attention=use_self_attention,n_mapping=n_mapping)
+
+        self.dec = Decoder(n_downsample, 0, self.enc_content.output_dim, input_dim, res_norm=params['res_norm'],
+                           activ=activ, pad_type=pad_type)
+
+    def forward(self, images):
+        # reconstruct an image
+        content, style_fake = self.encode(images)
+
+        images_recon = self.decode(content, style_fake)
+        return images_recon
+
+    def encode(self, images):
+        # encode an image to its content and style codes
+        style_fake = self.enc_style(images)
+        content = self.enc_content(images)
+
+        self.content_s_code = style_fake
+
+        return content, style_fake
+
+    def decode(self, content, style):
+        # decode content and style codes to an image
+
+        content = self.res_blocks(content,style,self.content_s_code)
+        images = self.dec(content)
+        return images
+
+
 class ConStyAttnGen(nn.Module):
     # AdaIN auto-encoder architecture
-    def __init__(self, input_dim, params):
+    def __init__(self, input_dim, params,concat_type = "add",attention_type="channelwise"):
         super(ConStyAttnGen, self).__init__()
         dim = params['dim']
         style_dim = params['style_dim']
@@ -181,7 +441,7 @@ class ConStyAttnGen(nn.Module):
 
         # content encoder
         self.enc_content = ContentEncoder(n_downsample, n_res, input_dim, dim, 'in', activ, pad_type=pad_type)
-        self.dec = Decoder(n_downsample, n_res, self.enc_content.output_dim, input_dim, res_norm='none', activ=activ, pad_type=pad_type)
+
 
         # #attention network
         # self.attention_net = \
@@ -189,14 +449,23 @@ class ConStyAttnGen(nn.Module):
         #         64*64,
         #         16*16,
         #         output_size=16*16,num_head=8)
+        if attention_type == "channelwise":
+            self.attention_net = attention.ChannelAttention(con_channels = dim*(2**n_downsample),style_channels=style_dim,attn_channels=dim*(2**n_downsample))
+        else:
+            self.attention_net = attention.ConStyAttention(con_channels = dim*(2**n_downsample),style_channels=style_dim,attn_channels=dim*(2**n_downsample)//2)
 
-        self.attention_net = attention.ConStyAttention(con_channels = dim*(2**n_downsample),style_channels=style_dim,attn_channels=dim*(2**n_downsample)//2)
-
+        if concat_type == 'adain':
+            self.concat_net = AdaINResBlocks(n_res,dim*(2**n_downsample),style_dim)
+            self.dec = Decoder(n_downsample, 2, self.enc_content.output_dim, input_dim, res_norm=params['res_norm'],
+                               activ=activ, pad_type=pad_type)
+        else:
+            self.concat_net = ConcatNetwork(con_dim=dim*(2**n_downsample),sty_dim=style_dim,concat_type=concat_type)
+            self.dec = Decoder(n_downsample, n_res, self.enc_content.output_dim, input_dim, res_norm=params['res_norm'],
+                               activ=activ, pad_type=pad_type)
 
     def forward(self, images):
         # reconstruct an image
         content, style_fake = self.encode(images)
-        import pdb; pdb.set_trace()
         images_recon = self.decode(content, style_fake)
         return images_recon
 
@@ -208,7 +477,7 @@ class ConStyAttnGen(nn.Module):
 
     def decode(self, content, style):
         # decode content and style codes to an image
-
+        content = self.concat_net(content,style)
         content_update = self.update_feature(content,style)
 
         images = self.dec(content_update)
@@ -222,11 +491,30 @@ class ConStyAttnGen(nn.Module):
         ##############
         #attention
         content_update, attn = self.attention_net(content,style)
-        self.attn = attn.cpu().data.numpy()
+        # self.attn = attn.cpu().data.numpy()
         # content_update = content_update.view(content_update.size(0),content_update.size(1),h,w)
         return content_update
     def get_attention(self):
         return self.attn
+
+    def assign_adain_params(self, adain_params, model):
+        # assign the adain_params to the AdaIN layers in model
+        for m in model.modules():
+            if m.__class__.__name__ == "AdaptiveInstanceNorm2d":
+                mean = adain_params[:, :m.num_features]
+                std = adain_params[:, m.num_features:2 * m.num_features]
+                m.bias = mean.contiguous().view(-1)
+                m.weight = std.contiguous().view(-1)
+                if adain_params.size(1) > 2 * m.num_features:
+                    adain_params = adain_params[:, 2 * m.num_features:]
+
+    def get_num_adain_params(self, model):
+        # return the number of AdaIN parameters needed by the model
+        num_adain_params = 0
+        for m in model.modules():
+            if m.__class__.__name__ == "AdaptiveInstanceNorm2d":
+                num_adain_params += 2 * m.num_features
+        return num_adain_params
 
 class AttnGen(nn.Module):
     # AdaIN auto-encoder architecture
@@ -335,7 +623,7 @@ class AdaINAttnGen(nn.Module):
     def decode(self, content, style):
         # decode content and style codes to an image
         adain_params = self.mlp(style)
-        self.assign_adain_params(adain_params, self.dec)
+        self._adain_params(adain_params, self.dec)
         images = self.dec(content)
         return images
 
@@ -460,7 +748,7 @@ class VAEGen(nn.Module):
 ##################################################################################
 
 class StyleEncoder(nn.Module):
-    def __init__(self, n_downsample, input_dim, dim, style_dim, norm, activ, pad_type):
+    def __init__(self, n_downsample, input_dim, dim, style_dim, norm, activ, pad_type, n_mapping=1):
         super(StyleEncoder, self).__init__()
         self.model = []
         self.model += [Conv2dBlock(input_dim, dim, 7, 1, 3, norm=norm, activation=activ, pad_type=pad_type)]
@@ -471,7 +759,8 @@ class StyleEncoder(nn.Module):
             self.model += [Conv2dBlock(dim, dim, 4, 2, 1, norm=norm, activation=activ, pad_type=pad_type)]
 
         self.model += [nn.AdaptiveAvgPool2d(1)] # global average pooling
-        self.model += [nn.Conv2d(dim, style_dim, 1, 1, 0)]
+        for i in range(n_mapping):
+            self.model += [nn.Conv2d(dim, style_dim, 1, 1, 0)]
 
         self.model = nn.Sequential(*self.model)
         self.output_dim = dim
@@ -579,6 +868,62 @@ class ResBlocks(nn.Module):
     def forward(self, x):
         return self.model(x)
 
+class AttnResBlocks(nn.Module):
+    def __init__(self, num_blocks, con_dim, sty_dim, attn_dim, norm='in', activation='relu', pad_type='zero', use_self_attention=False):
+        super(AttnResBlocks, self).__init__()
+        self.model = nn.ModuleList()
+        for i in range(num_blocks):
+            if use_self_attention:
+                self.model.append(
+                    AttnResBlock_SA(con_dim, sty_dim, attn_dim, norm=norm, activation=activation, pad_type=pad_type))
+            else:
+                self.model.append(
+                    AttnResBlock(con_dim, sty_dim, attn_dim, norm=norm, activation=activation, pad_type=pad_type))
+
+
+    def forward(self, x_con, x_sty):
+        for model in self.model:
+            x_con = model(x_con,x_sty)
+
+        return x_con
+
+class AttnResBlocks_MV(nn.Module):
+    def __init__(self, num_blocks, con_dim, sty_dim, attn_dim, norm='in', activation='relu', pad_type='zero', use_self_attention=False):
+        super(AttnResBlocks_MV, self).__init__()
+        self.model = nn.ModuleList()
+        for i in range(num_blocks):
+            self.model.append(
+                AttnResBlock_MV(con_dim, sty_dim, attn_dim, norm=norm, activation=activation, pad_type=pad_type))
+
+    def forward(self, x_con, x_sty):
+        for model in self.model:
+            x_con = model(x_con,x_sty)
+
+        return x_con
+
+    def get_mask_from_model(self):
+
+        return torch.cat([model.weight_mask.unsqueeze(0) for model in self.model])
+
+class AttnResBlocks_AdaIN(nn.Module):
+    def __init__(self, num_blocks, con_dim, sty_dim, attn_dim, norm='in', activation='relu', pad_type='zero', use_self_attention=False):
+        super(AttnResBlocks_AdaIN, self).__init__()
+        self.model = nn.ModuleList()
+        for i in range(num_blocks):
+            self.model.append(
+                AttnResBlock_AdaIN(con_dim, sty_dim, attn_dim, norm=norm, activation=activation, pad_type=pad_type))
+
+    def forward(self, x_con, x_sty):
+        for model in self.model:
+            x_con = model(x_con,x_sty)
+
+        return x_con
+
+    def get_mask_from_model(self):
+
+        return torch.cat([model.weight_mask.unsqueeze(0) for model in self.model])
+
+
 class MLP(nn.Module):
     def __init__(self, input_dim, output_dim, dim, n_blk, norm='none', activ='relu'):
 
@@ -611,6 +956,128 @@ class ResBlock(nn.Module):
         out += residual
         return out
 
+class AttnResBlock(nn.Module):
+    def __init__(self, con_dim,sty_dim,attn_dim, norm='in', activation='relu', pad_type='zero', tau=0.5):
+        super(AttnResBlock, self).__init__()
+
+        model = []
+        model += [Conv2dBlock(con_dim ,con_dim, 3, 1, 1, norm=norm, activation=activation, pad_type=pad_type)]
+        model += [Conv2dBlock(con_dim ,con_dim, 3, 1, 1, norm=norm, activation='none', pad_type=pad_type)]
+
+        self.attention_net = attention.ChannelAttention(con_dim,sty_dim,attn_dim,tau=tau)
+        self.model = nn.Sequential(*model)
+
+    def forward(self, x_con, x_sty):
+
+        #weight = 0 -> preserve
+        #weight = 1 -> use adapted
+        weight_mask = self.attention_net(x_con,x_sty)
+        residual = x_con
+        # import pdb; pdb.set_trace()
+        out = self.model(x_con) * weight_mask
+        out += residual
+        return out
+
+class AttnResBlock_SA(nn.Module):
+    def __init__(self, con_dim,sty_dim,attn_dim, norm='in', activation='relu', pad_type='zero', tau=0.5):
+        super(AttnResBlock_SA, self).__init__()
+
+        model = []
+        model += [Conv2dBlock(con_dim ,con_dim, 3, 1, 1, norm=norm, activation=activation, pad_type=pad_type)]
+        model += [Conv2dBlock(con_dim ,con_dim, 3, 1, 1, norm=norm, activation='none', pad_type=pad_type)]
+
+        self.attention_net = attention.ChannelAttention(con_dim,sty_dim,attn_dim,tau=tau)
+        self.model = nn.Sequential(*model)
+        self.self_attention = attention.SelfAttention(con_dim,con_dim)
+
+
+    def forward(self, x_con, x_sty):
+
+        #weight = 0 -> preserve
+        #weight = 1 -> use adapted
+        weight_mask = self.attention_net(x_con,x_sty)
+        residual = x_con
+        # import pdb; pdb.set_trace()
+        out = self.model(x_con) * weight_mask
+        out += residual
+
+        out = self.self_attention(out)
+
+        return out
+
+class AttnResBlock_AdaIN(nn.Module):
+    def __init__(self, con_dim,sty_dim,attn_dim, norm='in', activation='relu', pad_type='zero', tau=0.5):
+        super(AttnResBlock_AdaIN, self).__init__()
+
+        model = []
+        model += [Conv2dBlock(con_dim ,con_dim, 3, 1, 1, norm=norm, activation=activation, pad_type=pad_type)]
+        model += [Conv2dBlock(con_dim ,con_dim, 3, 1, 1, norm=norm, activation='none', pad_type=pad_type)]
+
+        self.attention_net = attention.ChannelAttention(con_dim,sty_dim,attn_dim,tau=tau)
+        self.model = nn.Sequential(*model)
+
+        self.mlp = nn.Conv2d(sty_dim,con_dim*2,1)
+
+    def forward(self, x_con, x_sty):
+
+        adain_params = self.mlp(x_sty)
+        self.assign_adain_params(adain_params,self.model)
+
+        #weight = 0 -> preserve
+        #weight = 1 -> use adapted
+        self.weight_mask = self.attention_net(x_con,x_sty)
+        residual = x_con
+        # import pdb; pdb.set_trace()
+        out = self.model(x_con) * self.weight_mask
+        out += residual
+        return out
+
+    def assign_adain_params(self, adain_params, model):
+        # assign the adain_params to the AdaIN layers in model
+        for m in model.modules():
+            if m.__class__.__name__ == "AdaptiveInstanceNorm2d":
+                mean = adain_params[:, :m.num_features]
+                std = adain_params[:, m.num_features:2 * m.num_features]
+                m.bias = mean.contiguous().view(-1)
+                m.weight = std.contiguous().view(-1)
+                if adain_params.size(1) > 2 * m.num_features:
+                    adain_params = adain_params[:, 2 * m.num_features:]
+
+    def get_num_adain_params(self, model):
+        # return the number of AdaIN parameters needed by the model
+        num_adain_params = 0
+        for m in model.modules():
+            if m.__class__.__name__ == "AdaptiveInstanceNorm2d":
+                num_adain_params += 2 * m.num_features
+        return num_adain_params
+
+class AttnResBlock_MV(nn.Module):
+    def __init__(self, con_dim,sty_dim,attn_dim, norm='in', activation='relu', pad_type='zero', tau=0.5):
+        super(AttnResBlock_MV, self).__init__()
+
+        model = []
+        model += [Conv2dBlock(con_dim ,con_dim, 3, 1, 1, norm=norm, activation=activation, pad_type=pad_type)]
+        model += [Conv2dBlock(con_dim ,con_dim, 3, 1, 1, norm=norm, activation='none', pad_type=pad_type)]
+
+        model_res = []
+        model_res += [Conv2dBlock(con_dim ,con_dim, 3, 1, 1, norm='adain_mv', activation=activation, pad_type=pad_type)]
+        model_res += [Conv2dBlock(con_dim ,con_dim, 3, 1, 1, norm=norm, activation='none', pad_type=pad_type)]
+
+        self.attention_net = attention.ChannelAttention(con_dim,sty_dim,attn_dim,tau=tau)
+        self.model = nn.Sequential(*model)
+        self.model_res = nn.Sequential(*model_res)
+
+    def forward(self, x_con, x_sty):
+
+        #weight = 0 -> preserve
+        #weight = 1 -> use adapted
+        self.weight_mask = self.attention_net(x_con,x_sty)
+        residual = x_con
+
+        out = self.model(x_con) * self.weight_mask + self.model_res(x_con) * (1-self.weight_mask).abs()
+        out += residual
+        return out
+
 class Conv2dBlock(nn.Module):
     def __init__(self, input_dim ,output_dim, kernel_size, stride,
                  padding=0, norm='none', activation='relu', pad_type='zero'):
@@ -637,6 +1104,8 @@ class Conv2dBlock(nn.Module):
             self.norm = LayerNorm(norm_dim)
         elif norm == 'adain':
             self.norm = AdaptiveInstanceNorm2d(norm_dim)
+        elif norm == 'adain_mv':
+            self.norm = AdaIN_MV(norm_dim)
         elif norm == 'none' or norm == 'sn':
             self.norm = None
         else:
@@ -791,6 +1260,37 @@ class AdaptiveInstanceNorm2d(nn.Module):
 
     def forward(self, x):
         assert self.weight is not None and self.bias is not None, "Please assign weight and bias before calling AdaIN!"
+        b, c = x.size(0), x.size(1)
+        running_mean = self.running_mean.repeat(b)
+        running_var = self.running_var.repeat(b)
+
+        # Apply instance norm
+        x_reshaped = x.contiguous().view(1, b * c, *x.size()[2:])
+
+        out = F.batch_norm(
+            x_reshaped, running_mean, running_var, self.weight, self.bias,
+            True, self.momentum, self.eps)
+
+        return out.view(b, c, *x.size()[2:])
+
+    def __repr__(self):
+        return self.__class__.__name__ + '(' + str(self.num_features) + ')'
+
+class AdaIN_MV(nn.Module):
+    def __init__(self, num_features, eps=1e-5, momentum=0.1):
+        super(AdaIN_MV, self).__init__()
+        self.num_features = num_features
+        self.eps = eps
+        self.momentum = momentum
+        # weight and bias are dynamically assigned
+        self.weight = None
+        self.bias = None
+        # just dummy buffers, not used
+        self.register_buffer('running_mean', torch.zeros(num_features))
+        self.register_buffer('running_var', torch.ones(num_features))
+
+    def forward(self, x):
+        assert self.weight is not None and self.bias is not None, "Please assign weight and bias before calling AdaIN_MV!"
         b, c = x.size(0), x.size(1)
         running_mean = self.running_mean.repeat(b)
         running_var = self.running_var.repeat(b)

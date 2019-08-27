@@ -9,13 +9,13 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.nn.init as init
-
+from torch.autograd import Variable
+import math
 from PIL import Image
 import numpy as np
 from scipy.misc import imread, imresize
 import cv2
 from torchvision import utils
-import pdb
 
 # from utils import get_config
 # config = get_config(opts.config)
@@ -45,7 +45,7 @@ def get_attention_from_generator(x_a,x_b,net_g, scale_factor):
 
     return gather_out, distrib_out
 
-def visualize_attention(x_a,x_b,alpha, scale_factor, shape_dim=5):
+def visualize_attention(x_a, x_b, alpha, scale_factor, shape_dim=5):
     # output : numpy concatenated image 8*64
 
     if shape_dim == 5:
@@ -183,6 +183,93 @@ class PATNBlock(nn.Module):
         sty_out = self.sty_stream(sty)
         torch.nn.functional.sigmoid(sty_out)
 
+class ChannelAttention(nn.Module):
+    def __init__(self, con_channels, style_channels, attn_channels, tau=0.5):
+        super(ChannelAttention, self).__init__()
+
+        #AttnGAN style attention
+
+        #content --> b * c * w * h
+        #style --> b * c * 1 * 1
+
+        self.con_channels = con_channels
+        self.attn_channels = attn_channels
+        self.style_channels = style_channels
+
+        self.net_q = nn.Conv2d(self.con_channels, self.attn_channels, kernel_size=1, stride=1, padding=0)
+        self.net_k = nn.Conv2d(self.style_channels, self.attn_channels, kernel_size=1, stride=1, padding=0)
+        self.net_v = nn.Conv2d(self.style_channels, self.style_channels, kernel_size=1, stride=1, padding=0)
+
+        self.tau = tau
+        # self.gamma = nn.Parameter(torch.zeros(1))
+        # self.gamma = 1
+
+    def forward(self, con, style):
+        b, c, w, h = con.shape
+
+        style_dim = style.size(1) #
+
+        con_avg = F.adaptive_avg_pool2d(con,(1,1))
+        con_q = self.net_q(con_avg)
+        sty_k = self.net_k(style)
+        sty_v = self.net_v(style)
+
+        con_q = con_q.view(b, con_q.size(1), -1)
+        sty_k_transpose = sty_k.view(b, sty_k.size(1), -1).permute(0, 2, 1)
+        # import pdb; pdb.set_trace()
+        score = torch.bmm(con_q, sty_k_transpose) / math.sqrt(con_q.size(1))
+        attn = F.softmax(score,dim=1)  # b * (h*w) * (h*w)
+
+        # con_v = con_v.view(b, c, h * w)  # b * c * (h*w)
+
+
+        out = torch.bmm(attn,sty_v.view(b,sty_v.size(1),-1))
+        out = out.unsqueeze(3)
+
+        per_channel_preserve_weight = F.sigmoid(out)
+
+        #binarize
+        per_channel_preserve_weight = torch.where(per_channel_preserve_weight > self.tau, torch.ones(1).cuda(), torch.zeros(1).cuda())
+        # out = self.gamma * out + con
+
+        return per_channel_preserve_weight
+
+class ChannelAttention_FC(nn.Module):
+    def __init__(self, con_channels, style_channels, tau=0.5 ):
+        super(ConStyAttention, self).__init__()
+
+        #AttnGAN style attention
+
+        #content --> b * c * w * h
+        #style --> b * c * 1 * 1
+
+        self.con_channels = con_channels
+        self.style_channels = style_channels
+        self.tau = torch.Tensor(tau,requires_grad=False)
+
+        self.fc_layer = nn.Conv2d(con_channels+style_channels, con_channels, kernel_size=1)
+        # self.gamma = nn.Parameter(torch.zeros(1))
+        # self.gamma = 1
+
+    def forward(self, con, style):
+        b, c, w, h = con.shape
+
+        style_dim = style.size(1) #
+
+        con_avg = F.adaptive_avg_pool2d(con,(1,1))
+
+        out = self.fc_layer(torch.cat((con_avg,style),dim=1))
+
+        per_channel_preserve_weight = F.sigmoid(out)
+
+        #binarize
+        per_channel_preserve_weight = torch.where(per_channel_preserve_weight > self.tau, 1, 0)
+        # out = self.gamma * out + con
+        attn = None
+
+        return per_channel_preserve_weight, attn
+
+
 
 class ConStyAttention(nn.Module):
     def __init__(self, con_channels, style_channels, attn_channels):
@@ -201,7 +288,8 @@ class ConStyAttention(nn.Module):
         self.net_con = nn.Conv2d(self.con_channels, self.attn_channels, kernel_size=1, stride=1, padding=0)
         self.net_v = nn.Conv2d(self.style_channels, self.style_channels, kernel_size=1, stride=1, padding=0)
 
-        self.gamma = nn.Parameter(torch.zeros(1))
+        # self.gamma = nn.Parameter(torch.zeros(1))
+        self.gamma = 1
 
     def forward(self, con, style):
         b,c,w,h = con.shape
@@ -237,9 +325,9 @@ class SelfAttention(nn.Module):
         self.net_k = nn.Conv2d(self.in_channels, self.attn_channels, kernel_size=1, stride=1, padding=0)
         self.net_v = nn.Conv2d(self.in_channels, self.attn_channels, kernel_size=1, stride=1, padding=0)
 
-        self.softmax = nn.Softmax()
+        self.softmax = nn.Softmax(dim=-1)
 
-        self.gamma = nn.Parameter(torch.zeros(1))
+        self.gamma = nn.Parameter(torch.ones(1),requires_grad=False)
 
     def forward(self, input):
         #input ==> b x c x w x h
@@ -250,19 +338,19 @@ class SelfAttention(nn.Module):
         k = self.net_k(input)
         v = self.net_v(input)
 
-        q_transpose = q.view(b,c,h*w).permute(0,1,2)
-        k = k.view(b,c,h*w)
+        v = v.view(b,c,h*w)
+        k_transpose = k.view(b,c,h*w).permute(0,2,1)
 
-        attn =  self.softmax(torch.bmm(q_transpose,g)) # b * (h*w) * (h*w)
+        attn =  self.softmax(torch.bmm(v,k_transpose)) # b * c * c
 
-        v = v.view(b,c,h*w)  # b * c * (h*w)
+        q = q.view(b,c,h*w)  # b * c * (h*w)
 
-        out = torch.bmm(v,attn.permute(0,2,1))
+        out = torch.bmm(attn,q)
         out = out.view(b,c,w,h)
 
-        out = self.gammaa * out + input
+        out = self.gamma * out + input
 
-        return out,attn
+        return out
 
 
 
